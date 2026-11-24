@@ -12,5 +12,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 timer-core = { path = "../timer-core" }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true

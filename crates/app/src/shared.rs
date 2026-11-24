@@ -14,6 +14,8 @@ pub enum Change {
     Runs,
     /// A clip was picked to be timed ([`Shared::time_clip`]).
     TimeClip,
+    /// Runs were picked to render ([`Shared::render_runs`]).
+    Render,
 }
 
 type Listener = Rc<dyn Fn(Change)>;
@@ -28,6 +30,8 @@ pub struct Shared {
     pub load_error: Option<String>,
     /// The clip picked to be timed, for the Time page to take.
     to_time: Rc<RefCell<Option<std::path::PathBuf>>>,
+    /// Runs picked to render, for the Output page to take.
+    to_render: Rc<RefCell<Vec<String>>>,
 }
 
 impl Shared {
@@ -45,6 +49,7 @@ impl Shared {
             listeners: Rc::default(),
             load_error,
             to_time: Rc::default(),
+            to_render: Rc::default(),
         }
     }
 
@@ -82,6 +87,17 @@ impl Shared {
     /// The clip picked to be timed, once.
     pub fn take_clip_to_time(&self) -> Option<std::path::PathBuf> {
         self.to_time.borrow_mut().take()
+    }
+
+    /// Queues these runs' overlays on the Output page.
+    pub fn render_runs(&self, run_ids: Vec<String>) {
+        self.to_render.borrow_mut().extend(run_ids);
+        self.notify(Change::Render);
+    }
+
+    /// The runs picked to render, once.
+    pub fn take_runs_to_render(&self) -> Vec<String> {
+        std::mem::take(&mut self.to_render.borrow_mut())
     }
 
     pub fn notify(&self, change: Change) {

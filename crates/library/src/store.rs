@@ -48,8 +48,8 @@ pub struct Library {
     db: Connection,
 }
 
-/// 1: clips. 2: marker drafts. 3: course references.
-const VERSION: u32 = 3;
+/// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
+const VERSION: u32 = 4;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -92,6 +92,15 @@ impl Library {
              CREATE TABLE IF NOT EXISTS course_references (
                course_id TEXT PRIMARY KEY,
                run_id TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS renders (
+               run_id TEXT PRIMARY KEY,
+               clip TEXT NOT NULL,
+               overlay TEXT NOT NULL,
+               first_frame INTEGER NOT NULL,
+               timecode TEXT NOT NULL,
+               fingerprint TEXT NOT NULL,
+               rendered_ms INTEGER NOT NULL
              );",
         )?;
         db.pragma_update(None, "user_version", VERSION)?;
@@ -168,6 +177,78 @@ impl Library {
         }
         Ok(gone.len())
     }
+}
+
+/// A run's rendered overlay: where it is and where it lines up with its clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rendered {
+    pub run_id: String,
+    pub clip: PathBuf,
+    pub overlay: PathBuf,
+    /// The clip frame the overlay's first frame goes over.
+    pub first_frame: i64,
+    /// The overlay's starting timecode (the clip's at `first_frame`).
+    pub timecode: String,
+    /// The run's markers when rendered (its fingerprint): if they've changed
+    /// since, the overlay is out of date.
+    pub fingerprint: String,
+    pub rendered_ms: i64,
+}
+
+impl Library {
+    pub fn rendered(&self, run_id: &str) -> Result<Option<Rendered>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT run_id, clip, overlay, first_frame, timecode, fingerprint, rendered_ms
+                 FROM renders WHERE run_id = ?1",
+                [run_id],
+                rendered_row,
+            )
+            .optional()?)
+    }
+
+    /// Every rendered overlay, by run id.
+    pub fn renders(&self) -> Result<std::collections::HashMap<String, Rendered>> {
+        let mut stmt = self.db.prepare(
+            "SELECT run_id, clip, overlay, first_frame, timecode, fingerprint, rendered_ms
+             FROM renders",
+        )?;
+        let rows = stmt.query_map([], rendered_row)?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|r| (r.run_id.clone(), r))
+            .collect())
+    }
+
+    pub fn set_rendered(&self, r: &Rendered) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO renders VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                r.run_id,
+                path_text(&r.clip),
+                path_text(&r.overlay),
+                r.first_frame,
+                r.timecode,
+                r.fingerprint,
+                r.rendered_ms
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+fn rendered_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Rendered> {
+    Ok(Rendered {
+        run_id: r.get(0)?,
+        clip: PathBuf::from(r.get::<_, String>(1)?),
+        overlay: PathBuf::from(r.get::<_, String>(2)?),
+        first_frame: r.get(3)?,
+        timecode: r.get(4)?,
+        fingerprint: r.get(5)?,
+        rendered_ms: r.get(6)?,
+    })
 }
 
 /// Markers placed on a clip but not yet committed as a run.
@@ -362,6 +443,25 @@ mod tests {
         lib.set_reference("c", "run_1").unwrap();
         lib.set_reference("c", "run_2").unwrap();
         assert_eq!(lib.reference("c").unwrap().as_deref(), Some("run_2"));
+    }
+
+    #[test]
+    fn remembers_rendered_overlays() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("l.sqlite3")).unwrap();
+        assert_eq!(lib.rendered("r1").unwrap(), None);
+        let r = Rendered {
+            run_id: "r1".into(),
+            clip: "/v/a.mp4".into(),
+            overlay: "/v/Overlays/a.overlay.mov".into(),
+            first_frame: 30,
+            timecode: "01:00:01:00".into(),
+            fingerprint: "a.mp4:abc".into(),
+            rendered_ms: 5,
+        };
+        lib.set_rendered(&r).unwrap();
+        assert_eq!(lib.rendered("r1").unwrap(), Some(r.clone()));
+        assert_eq!(lib.renders().unwrap()["r1"], r);
     }
 
     #[test]

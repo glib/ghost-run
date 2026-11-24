@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gio, glib};
 use library::settings::AppSettings;
 
 use crate::shared::Shared;
@@ -88,6 +88,15 @@ pub fn open(shared: &Shared) {
         |s| s.resolve_template.clone(),
         |s, v| s.resolve_template = v,
         ("Resolve project", &["*.drp"]),
+    ));
+    files.add(&file_row(
+        shared,
+        &mut subscriptions,
+        "Overlay folder",
+        "Where rendered overlays go. Not set: an Overlays folder beside each clip.",
+        |s| s.overlay_folder.clone(),
+        |s, v| s.overlay_folder = v,
+        ("Folder", &[]),
     ));
     let shared2 = shared.clone();
     dialog.connect_closed(move |_| {
@@ -189,20 +198,27 @@ fn file_row(
     }
     let filters = gio::ListStore::new::<gtk::FileFilter>();
     filters.append(&filter);
+    let folder = patterns.is_empty();
     let (shared2, title) = (shared.clone(), title.to_owned());
     choose.connect_clicked(move |_| {
-        let dialog = gtk::FileDialog::builder()
-            .title(&title)
-            .filters(&filters)
-            .build();
+        let dialog = gtk::FileDialog::builder().title(&title).build();
+        if !folder {
+            dialog.set_filters(Some(&filters));
+        }
         let shared3 = shared2.clone();
-        dialog.open(Some(&shared2.window), gio::Cancellable::NONE, move |r| {
+        let chosen = move |r: Result<gio::File, glib::Error>| {
             if let Ok(file) = r
                 && let Some(path) = file.path()
             {
                 let _ = shared3.update(|s| set(s, Some(path)));
             }
-        });
+        };
+        // No patterns: it's a folder.
+        if folder {
+            dialog.select_folder(Some(&shared2.window), gio::Cancellable::NONE, chosen);
+        } else {
+            dialog.open(Some(&shared2.window), gio::Cancellable::NONE, chosen);
+        }
     });
     let shared2 = shared.clone();
     clear.connect_clicked(move |_| {
