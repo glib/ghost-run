@@ -5,12 +5,19 @@ use adw::prelude::*;
 /// Wraps the pages in a split view with a sidebar. `import` is the Import
 /// page (the old resolve-ingest window, with its own header bar).
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
-    let pages: [(&str, &str, &str, gtk::Widget); 2] = [
+    let shared = crate::shared::Shared::new(window);
+    let pages: [(&str, &str, &str, gtk::Widget); 3] = [
         (
             "library",
             "Library",
             "folder-videos-symbolic",
-            crate::library_page::page(window),
+            crate::library_page::page(&shared),
+        ),
+        (
+            "runs",
+            "Runs",
+            "view-list-ordered-symbolic",
+            crate::runs_page::page(&shared),
         ),
         ("import", "Import", "document-save-symbolic", import),
     ];
@@ -33,6 +40,13 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     let sidebar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("Ghost Run", "")));
+    let settings = gtk::Button::from_icon_name("emblem-system-symbolic");
+    settings.set_tooltip_text(Some(
+        "Settings: footage folders, run database, Resolve template",
+    ));
+    let shared2 = shared.clone();
+    settings.connect_clicked(move |_| crate::settings_dialog::open(&shared2));
+    header.pack_end(&settings);
     sidebar.add_top_bar(&header);
     sidebar.set_content(Some(&list));
 
@@ -53,6 +67,16 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         }
         split2.set_show_content(true);
     });
-    list.select_row(list.row_at_index(0).as_ref());
+    // GHOST_RUN_PAGE=runs (etc.) opens on that page: for screenshots and testing.
+    let start = std::env::var("GHOST_RUN_PAGE").unwrap_or_default();
+    let mut index = 0;
+    while let Some(row) = list.row_at_index(index) {
+        if row.widget_name() == start.as_str() {
+            break;
+        }
+        index += 1;
+    }
+    let first = list.row_at_index(index).or_else(|| list.row_at_index(0));
+    list.select_row(first.as_ref());
     split
 }

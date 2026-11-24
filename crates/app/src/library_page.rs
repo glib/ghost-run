@@ -15,8 +15,9 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use library::scan::{self, Progress};
-use library::settings::AppSettings;
 use library::{Cancel, Clip, Library, MediaInfo, ProxyState, proxy};
+
+use crate::shared::{Change, Shared};
 
 enum Command {
     Scan(Vec<PathBuf>),
@@ -33,7 +34,8 @@ enum Reply {
 }
 
 struct State {
-    settings: AppSettings,
+    /// The folders the last scan covered.
+    scanned: Vec<PathBuf>,
     clips: Vec<Clip>,
     /// Lower-case clip file name → "course · run id".
     runs: HashMap<String, String>,
@@ -47,6 +49,7 @@ struct State {
 
 #[derive(Clone)]
 struct Page {
+    shared: Shared,
     window: adw::ApplicationWindow,
     state: Rc<RefCell<State>>,
     store: gio::ListStore,
@@ -63,14 +66,8 @@ struct Page {
 }
 
 /// Builds the page; the returned widget goes in the app's stack.
-pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
-    let (settings, settings_error) = match AppSettings::load() {
-        Ok(s) => (s, None),
-        Err(e) => (
-            AppSettings::default(),
-            Some(format!("Settings could not be read: {e:#}")),
-        ),
-    };
+pub fn page(shared: &Shared) -> gtk::Widget {
+    let window = &shared.window;
     let (tx, commands) = mpsc::channel();
     let (replies, rx) = mpsc::channel();
     let cancel = Cancel::default();
@@ -81,6 +78,7 @@ pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
     header.set_title_widget(Some(&adw::WindowTitle::new("Library", "")));
     let folders = button("Folders…");
     folders.set_tooltip_text(Some("Footage folders, run database and Resolve template"));
+
     header.pack_end(&folders);
     root.append(&header);
 
@@ -129,9 +127,10 @@ pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
     footer.append(&progress);
 
     let page = Page {
+        shared: shared.clone(),
         window: window.clone(),
         state: Rc::new(RefCell::new(State {
-            settings,
+            scanned: Vec::new(),
             clips: Vec::new(),
             runs: HashMap::new(),
             runs_error: None,
@@ -179,9 +178,18 @@ pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
         refill(&p);
     });
     let p = page.clone();
-    folders.connect_clicked(move |_| settings_dialog(&p));
+    folders.connect_clicked(move |_| crate::settings_dialog::open(&p.shared));
     let p = page.clone();
-    add_first.connect_clicked(move |_| add_folder(&p, None));
+    add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
+    let p = page.clone();
+    shared.subscribe(move |change| {
+        load_runs(&p);
+        refill(&p);
+        let folders = p.shared.settings().footage_folders.clone();
+        if change == Change::Settings && folders != p.state.borrow().scanned {
+            start_scan(&p);
+        }
+    });
 
     let p = page.clone();
     glib::timeout_add_local(Duration::from_millis(150), move || {
@@ -192,8 +200,8 @@ pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
     });
 
     load_runs(&page);
-    if let Some(e) = settings_error {
-        page.status.set_text(&e);
+    if let Some(e) = &shared.load_error {
+        page.status.set_text(e);
     }
     // The library from last time shows at once; a scan then brings it up to date.
     match Library::open_default().and_then(|l| l.clips()) {
@@ -203,7 +211,7 @@ pub fn page(window: &adw::ApplicationWindow) -> gtk::Widget {
             .set_text(&format!("Library could not be opened: {e:#}")),
     }
     refill(&page);
-    if !page.state.borrow().settings.footage_folders.is_empty() {
+    if !shared.settings().footage_folders.is_empty() {
         start_scan(&page);
     }
     root.upcast()
@@ -356,9 +364,16 @@ fn handle(p: &Page, reply: Reply) {
 }
 
 fn start_scan(p: &Page) {
-    let folders = p.state.borrow().settings.footage_folders.clone();
-    if folders.is_empty() || p.state.borrow().busy {
-        refresh_controls(p);
+    let folders = p.shared.settings().footage_folders.clone();
+    if p.state.borrow().busy {
+        return;
+    }
+    p.state.borrow_mut().scanned = folders.clone();
+    if folders.is_empty() {
+        // Nothing to scan: forget clips from folders that were removed.
+        let _ = Library::open_default().and_then(|l| l.retain(&HashSet::new()));
+        p.state.borrow_mut().clips.clear();
+        refill(p);
         return;
     }
     p.state.borrow_mut().busy = true;
@@ -423,7 +438,7 @@ fn confirm_proxies(p: &Page) {
 
 fn refresh_controls(p: &Page) {
     let s = p.state.borrow();
-    let no_folders = s.settings.footage_folders.is_empty();
+    let no_folders = p.shared.settings().footage_folders.is_empty();
     p.banner.set_visible(no_folders || s.runs_error.is_some());
     p.banner_text.set_text(if no_folders {
         "Add the folders your footage is in. Ghost Run lists every clip in them and keeps the list up to date."
@@ -653,7 +668,7 @@ fn run_key(path: &Path) -> String {
 }
 
 fn load_runs(p: &Page) {
-    let path = p.state.borrow().settings.run_database.clone();
+    let path = p.shared.settings().run_database.clone();
     let mut s = p.state.borrow_mut();
     s.runs.clear();
     s.runs_error = None;
@@ -680,204 +695,6 @@ fn duration(seconds: f64) -> String {
     } else {
         format!("{}:{:02}", s / 60, s % 60)
     }
-}
-
-fn save_settings(p: &Page) {
-    if let Err(e) = p.state.borrow().settings.save() {
-        p.status
-            .set_text(&format!("Settings could not be saved: {e:#}"));
-    }
-}
-
-fn add_folder(p: &Page, then: Option<Refill>) {
-    let dialog = gtk::FileDialog::builder()
-        .title("Add a footage folder")
-        .build();
-    let p = p.clone();
-    dialog.select_folder(Some(&p.window.clone()), gio::Cancellable::NONE, move |r| {
-        let Ok(folder) = r else { return };
-        let Some(path) = folder.path() else {
-            p.status.set_text(
-                "Choose a folder on this computer (not a network location in the file browser).",
-            );
-            return;
-        };
-        {
-            let mut s = p.state.borrow_mut();
-            if !s.settings.footage_folders.contains(&path) {
-                s.settings.footage_folders.push(path);
-            }
-        }
-        save_settings(&p);
-        if let Some(then) = &then {
-            then();
-        }
-        start_scan(&p);
-    });
-}
-
-/// Rebuilds the folder rows in the settings dialog.
-type Refill = Rc<dyn Fn()>;
-
-fn settings_dialog(p: &Page) {
-    let dialog = adw::PreferencesDialog::new();
-    dialog.set_title("Library settings");
-    let page = adw::PreferencesPage::new();
-    dialog.add(&page);
-
-    let folders = adw::PreferencesGroup::new();
-    folders.set_title("Footage folders");
-    folders.set_description(Some(
-        "Every video in these folders and their subfolders is listed. Proxy, cache and backup folders are skipped.",
-    ));
-    let add = button("Add folder…");
-    add.set_valign(gtk::Align::Center);
-    folders.set_header_suffix(Some(&add));
-    page.add(&folders);
-    let rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::default();
-    let fill: Rc<RefCell<Option<Refill>>> = Rc::default();
-    {
-        let (p, folders, rows, fill_ref) = (p.clone(), folders.clone(), rows.clone(), fill.clone());
-        let fill_fn: Refill = Rc::new(move || {
-            for row in rows.borrow_mut().drain(..) {
-                folders.remove(&row);
-            }
-            let list = p.state.borrow().settings.footage_folders.clone();
-            if list.is_empty() {
-                let row = adw::ActionRow::builder().title("No folders yet").build();
-                folders.add(&row);
-                rows.borrow_mut().push(row);
-            }
-            for path in list {
-                let row = adw::ActionRow::builder()
-                    .title(
-                        path.file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .as_ref(),
-                    )
-                    .subtitle(path.display().to_string())
-                    .build();
-                let remove = gtk::Button::from_icon_name("list-remove-symbolic");
-                remove.set_valign(gtk::Align::Center);
-                remove.set_tooltip_text(Some("Stop listing this folder (nothing is deleted)"));
-                remove.add_css_class("flat");
-                row.add_suffix(&remove);
-                let (p, fill_ref) = (p.clone(), fill_ref.clone());
-                remove.connect_clicked(move |_| {
-                    p.state
-                        .borrow_mut()
-                        .settings
-                        .footage_folders
-                        .retain(|f| f != &path);
-                    save_settings(&p);
-                    if let Some(f) = fill_ref.borrow().as_ref() {
-                        f();
-                    }
-                    start_scan(&p);
-                });
-                folders.add(&row);
-                rows.borrow_mut().push(row);
-            }
-        });
-        *fill.borrow_mut() = Some(fill_fn.clone());
-        fill_fn();
-    }
-    let (p2, fill2) = (p.clone(), fill.clone());
-    add.connect_clicked(move |_| add_folder(&p2, fill2.borrow().clone()));
-
-    let files = adw::PreferencesGroup::new();
-    files.set_title("Files");
-    page.add(&files);
-    let database = file_row(
-        p,
-        "Run database",
-        "timer_db.yaml: your courses and stored runs. The Run column comes from it.",
-        |s| s.run_database.clone(),
-        |s, v| s.run_database = v,
-        "YAML",
-        &["*.yaml", "*.yml"],
-    );
-    files.add(&database);
-    let template = file_row(
-        p,
-        "Resolve project template",
-        "A .drp exported from Resolve. Not used yet: new Resolve projects will start from it.",
-        |s| s.resolve_template.clone(),
-        |s, v| s.resolve_template = v,
-        "Resolve project",
-        &["*.drp"],
-    );
-    files.add(&template);
-    let p2 = p.clone();
-    dialog.connect_closed(move |_| {
-        load_runs(&p2);
-        refill(&p2);
-    });
-    dialog.present(Some(&p.window));
-}
-
-/// A settings row holding one file path, with Choose and Clear buttons.
-fn file_row(
-    p: &Page,
-    title: &str,
-    help: &str,
-    get: fn(&AppSettings) -> Option<PathBuf>,
-    set: fn(&mut AppSettings, Option<PathBuf>),
-    filter_name: &str,
-    patterns: &[&str],
-) -> adw::ActionRow {
-    let row = adw::ActionRow::builder().title(title).build();
-    let show = {
-        let (row, p, help) = (row.clone(), p.clone(), help.to_owned());
-        move || {
-            let current = get(&p.state.borrow().settings);
-            row.set_subtitle(&match current {
-                Some(path) => format!("{}\n{help}", path.display()),
-                None => format!("Not set\n{help}"),
-            });
-        }
-    };
-    show();
-    let choose = button("Choose…");
-    choose.set_valign(gtk::Align::Center);
-    let clear = gtk::Button::from_icon_name("edit-clear-symbolic");
-    clear.set_valign(gtk::Align::Center);
-    clear.set_tooltip_text(Some("Clear"));
-    clear.add_css_class("flat");
-    row.add_suffix(&choose);
-    row.add_suffix(&clear);
-    let filter = gtk::FileFilter::new();
-    filter.set_name(Some(filter_name));
-    for pattern in patterns {
-        filter.add_pattern(pattern);
-    }
-    let filters = gio::ListStore::new::<gtk::FileFilter>();
-    filters.append(&filter);
-    let (p2, show2, title) = (p.clone(), show.clone(), title.to_owned());
-    choose.connect_clicked(move |_| {
-        let dialog = gtk::FileDialog::builder()
-            .title(&title)
-            .filters(&filters)
-            .build();
-        let (p3, show3) = (p2.clone(), show2.clone());
-        dialog.open(Some(&p2.window), gio::Cancellable::NONE, move |r| {
-            if let Ok(file) = r
-                && let Some(path) = file.path()
-            {
-                set(&mut p3.state.borrow_mut().settings, Some(path));
-                save_settings(&p3);
-                show3();
-            }
-        });
-    });
-    let p2 = p.clone();
-    clear.connect_clicked(move |_| {
-        set(&mut p2.state.borrow_mut().settings, None);
-        save_settings(&p2);
-        show();
-    });
-    row
 }
 
 fn label(text: &str, class: &str) -> gtk::Label {

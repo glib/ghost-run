@@ -30,3 +30,4 @@ button.ingest-action:not(.suggested-action) { border: 1px solid #788494; }
 .footage-table > listview > row { min-height: 30px; }
 .footage-table cell { padding: 2px 6px; }
 button.table-action { min-height: 24px; padding: 2px 8px; }
+.fastest { color: #c3a6ff; font-weight: bold; }
