@@ -27,7 +27,18 @@ impl Jobs {
             .create(true)
             .truncate(false)
             .open(dir.join("application.lock"))?;
-        lock.try_lock_exclusive().context("Another Resolve Ingest instance or supervised worker is active. Wait for it to stop before retrying.")?;
+        // A forked child holds a copy of every open descriptor until it execs,
+        // so a lock just released can stay held for a moment (seen with
+        // parallel tests spawning ffmpeg); a worker that is exiting is the same.
+        // Wait briefly before deciding another instance is running.
+        let mut tries = 0;
+        while let Err(e) = lock.try_lock_exclusive() {
+            tries += 1;
+            if tries >= 40 {
+                return Err(e).context("Another Ghost Run instance or supervised worker is active. Wait for it to stop before retrying.");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let mut db = Connection::open(dir.join("jobs.sqlite3"))?;
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(version <= 2, "Unsupported job database version");
