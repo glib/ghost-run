@@ -44,14 +44,18 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The app (crates/app) builds against GTK4 and libadwaita. Usually ~30 s,
-      # but apt downloads on hosted runners sometimes stall for good, so each
-      # attempt is time-limited and retried (no man-db rebuild, short network
-      # timeouts).
+      # The app (crates/app) builds against GTK4 and libadwaita. Runners hosted
+      # on AWS get the us-east-2.ec2 Ubuntu mirror, which crawled at ~120 kB/s
+      # and stalled every attempt; the Azure mirror the other runners use
+      # fetched the same packages in 6 s. So pin apt to it (archive.ubuntu.com
+      # as fallback), and still time-limit and retry each attempt.
       - name: Install GTK
         timeout-minutes: 10
         run: |
           sudo rm -f /var/lib/man-db/auto-update
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttp://archive.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt
+          fi
           apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
           for attempt in 1 2 3; do
             if timeout 150 sudo apt-get "${apt_opts[@]}" update -q &&
