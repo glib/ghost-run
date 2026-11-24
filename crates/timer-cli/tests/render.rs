@@ -89,6 +89,29 @@ fn renders_a_transparent_prores_file_with_timecode() {
     assert!(info.contains("width=320"), "{info}");
     assert!(info.contains("nb_frames=561"), "{info}"); // frames 100..=660
 
+    // A --fps that isn't the clip's rate would make the timer run fast or slow.
+    let out = Command::new(env!("CARGO_BIN_EXE_rtimer"))
+        .arg("--db")
+        .arg(root().join("examples/timer_db.yaml"))
+        .args(["render", "--course", "lower_whistler_a_line", "--markers"])
+        .arg(root().join("examples/markers.csv"))
+        .args([
+            "--filename",
+            "x.MP4",
+            "--fps",
+            "29.97",
+            "--source",
+            mov_arg,
+            "--out",
+        ])
+        .arg(dir.path().join("wrong.mov"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Use --fps 59.94"), "{err}");
+    assert!(!dir.path().join("wrong.mov").exists());
+
     let png = dir.path().join("finish.png");
     rtimer(&[
         "--out",

@@ -1,7 +1,7 @@
 //! `rtimer render`: the overlay as one transparent video file to lay over the
 //! clip, instead of a Fusion comp.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Args;
@@ -60,6 +60,9 @@ pub fn render(
         .as_ref()
         .map_or_else(|| FrameRate::from_fps(payload.source_fps), |i| i.rate);
     let fps = payload.source_fps;
+    if let (Some(info), Some(source)) = (&info, &args.source) {
+        check_fps(fps, info.rate, source)?;
+    }
     let (start, finish) = (payload.start_frame, payload.finish_frame);
     let mut renderer = FrameRenderer::new(payload, width, height);
     let mut panel = renderer.blank_panel();
@@ -124,4 +127,48 @@ pub fn render(
         );
     }
     Ok(())
+}
+
+/// `--fps` turns marker frames into seconds; if it isn't the clip's rate, the
+/// timer runs fast or slow against the video. 59.94 matches 60000/1001.
+fn check_fps(fps: f64, rate: FrameRate, source: &Path) -> Result<(), String> {
+    let actual = rate.fps();
+    if ((fps - actual) / actual).abs() <= 1e-4 {
+        return Ok(());
+    }
+    Err(format!(
+        "--fps {} doesn't match {}, which is {} fps: the timer would run at the wrong speed. Use --fps {}",
+        trim(fps),
+        source.display(),
+        trim(actual),
+        trim(actual)
+    ))
+}
+
+/// A rate as people write it: 29.97, 59.94, 23.976, 50.
+fn trim(fps: f64) -> String {
+    let s = format!("{fps:.3}");
+    s.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fps_must_match_the_source() {
+        let clip = Path::new("clip.mp4");
+        let ntsc = FrameRate::from_fps(29.97);
+        assert!(check_fps(29.97, ntsc, clip).is_ok());
+        assert!(check_fps(30000.0 / 1001.0, ntsc, clip).is_ok());
+        assert_eq!(
+            check_fps(59.94, ntsc, clip).unwrap_err(),
+            "--fps 59.94 doesn't match clip.mp4, which is 29.97 fps: the timer would run at \
+             the wrong speed. Use --fps 29.97"
+        );
+        // 60 against 59.94 is 0.1% off: 0.09 s over a 90 s run.
+        assert!(check_fps(60.0, FrameRate::from_fps(59.94), clip).is_err());
+        assert_eq!(trim(50.0), "50");
+        assert_eq!(trim(23.976), "23.976");
+    }
 }

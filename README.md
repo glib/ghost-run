@@ -164,6 +164,8 @@ target\release\rtimer --db timer_db.yaml render --course lower_whistler_a_line -
   second before `Start` (`--pre-roll`) to five seconds after `Finish` (`--hold`).
   It carries the clip's timecode, so selecting it and the clip and using
   **Auto Align Clips → Based on Timecode** lines it up, however the clip is trimmed.
+- `--fps` must be the clip's frame rate (it turns marker frames into seconds);
+  with `--source`, a different rate is an error that names the right one.
 - Without `--source`, it's 3840×2160 (`--size`) at `--fps`, and the command
   prints the clip frame it starts at.
 - `--out overlay_%05d.png` writes a PNG sequence instead (about a sixth of the
