@@ -37,7 +37,7 @@ ghost-run cleanup BATCH_ID --remove
 
 `--archive-only` preserves every regular file found without requesting editing copies. `--allow-local-archive` explicitly enables local archives for tests; the desktop requires CIFS for the archive. Ctrl+C requests cancellation. Incomplete headless batches return a nonzero exit code.
 
-Settings live in `$XDG_CONFIG_HOME/resolve-ingest/settings.toml` (default `~/.config`). The job database and application lock live in `$XDG_DATA_HOME/resolve-ingest` (default `~/.local/share`), which must be local storage. Mount credentials are not stored. (These keep their `resolve-ingest` names so existing settings and history carry over.)
+Settings live in `$XDG_CONFIG_HOME/ghost-run/import/settings.toml` (default `~/.config`). The job database and application lock live in `$XDG_DATA_HOME/ghost-run/import` (default `~/.local/share`), which must be local storage. Mount credentials are not stored. On first start, Ghost Run moves the old `resolve-ingest` folders there if the new ones don't exist yet, so existing settings and history carry over.
 
 ## Checks
 

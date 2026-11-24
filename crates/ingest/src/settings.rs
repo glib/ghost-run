@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -72,11 +72,60 @@ impl Default for Settings {
         }
     }
 }
+/// Import's settings: `~/.config/ghost-run/import` (beside the app's own
+/// `settings.toml`, which is a different file).
 pub fn config_dir() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config").join("resolve-ingest")
+    xdg("XDG_CONFIG_HOME", ".config").join("ghost-run/import")
 }
+/// Import's job journal and lock: `~/.local/share/ghost-run/import`.
 pub fn data_dir() -> PathBuf {
-    xdg("XDG_DATA_HOME", ".local/share").join("resolve-ingest")
+    xdg("XDG_DATA_HOME", ".local/share").join("ghost-run/import")
+}
+
+/// Moves settings and the journal from where the separate resolve-ingest app
+/// kept them (`.../resolve-ingest`), once: only when the old folder exists and
+/// the new one doesn't. Call before anything opens either folder.
+pub fn move_from_resolve_ingest() -> Result<()> {
+    for (var, fallback, new) in [
+        ("XDG_CONFIG_HOME", ".config", config_dir()),
+        ("XDG_DATA_HOME", ".local/share", data_dir()),
+    ] {
+        let old = xdg(var, fallback).join("resolve-ingest");
+        move_dir(&old, &new)
+            .with_context(|| format!("couldn't move {} to {}", old.display(), new.display()))?;
+    }
+    Ok(())
+}
+
+fn move_dir(old: &Path, new: &Path) -> Result<()> {
+    if !old.is_dir() || new.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(new.parent().context("no parent folder")?)?;
+    // Same filesystem in practice (both under the home folder): a rename.
+    if fs::rename(old, new).is_ok() {
+        return Ok(());
+    }
+    let tmp = new.with_extension("moving");
+    let _ = fs::remove_dir_all(&tmp);
+    copy_dir(old, &tmp)?;
+    fs::rename(&tmp, new)?;
+    fs::remove_dir_all(old)?;
+    Ok(())
+}
+
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 fn xdg(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
@@ -110,5 +159,56 @@ impl Settings {
         fs::rename(tmp, dir.join("settings.toml"))?;
         std::fs::File::open(dir)?.sync_all()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moves_the_old_folder_once() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join("resolve-ingest");
+        let new = home.path().join("ghost-run/import");
+        fs::create_dir_all(old.join("sub")).unwrap();
+        fs::write(old.join("settings.toml"), "version = 1").unwrap();
+        fs::write(old.join("sub/jobs.sqlite3"), "db").unwrap();
+
+        move_dir(&old, &new).unwrap();
+        assert!(!old.exists());
+        assert_eq!(
+            fs::read_to_string(new.join("settings.toml")).unwrap(),
+            "version = 1"
+        );
+        assert_eq!(
+            fs::read_to_string(new.join("sub/jobs.sqlite3")).unwrap(),
+            "db"
+        );
+
+        // An old folder reappearing never replaces the new one.
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("settings.toml"), "version = 9").unwrap();
+        move_dir(&old, &new).unwrap();
+        assert!(old.exists());
+        assert_eq!(
+            fs::read_to_string(new.join("settings.toml")).unwrap(),
+            "version = 1"
+        );
+
+        // Nothing to move: nothing happens.
+        move_dir(&home.path().join("absent"), &home.path().join("x")).unwrap();
+        assert!(!home.path().join("x").exists());
+    }
+
+    #[test]
+    fn copies_when_it_cannot_rename() {
+        let home = tempfile::tempdir().unwrap();
+        let old = home.path().join("old");
+        fs::create_dir_all(old.join("a")).unwrap();
+        fs::write(old.join("a/f"), "x").unwrap();
+        let to = home.path().join("copy");
+        copy_dir(&old, &to).unwrap();
+        assert_eq!(fs::read_to_string(to.join("a/f")).unwrap(), "x");
     }
 }
