@@ -16,3 +16,6 @@ timer_db.yaml
 
 # Rust
 /target/
+
+# Import partials
+*.partial

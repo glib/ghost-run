@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Ghost Run
+Comment=Import, time and review your race runs
+Exec=@EXEC@
+Icon=io.github.glib.GhostRun
+Terminal=false
+Categories=AudioVideo;Video;Sports;
+Keywords=mtb;downhill;enduro;timer;splits;resolve;
+StartupWMClass=io.github.glib.GhostRun

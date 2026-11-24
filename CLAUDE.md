@@ -1,17 +1,21 @@
-# Resolve Timer
+# Ghost Run (formerly Resolve Timer)
 
-Timing tool for mountain-bike runs: Start/S1…/Finish markers on a clip give
+Self lap timing for mountain-bike racing: Start/S1…/Finish markers on a clip give
 sector and lap times, compared against earlier runs (best lap, optimal lap) and
-shown as a video overlay. One user (Liam), public repo, no deploy.
+shown as a video overlay. One user (Liam), public repo, no deploy, Linux only.
 
-Today it's a Python script inside DaVinci Resolve Studio. It is moving to a
+It is becoming one GTK4/libadwaita desktop app, `ghost-run`
+(`docs/decisions/0003-one-app-ghost-run.md` has the plan and the order of PRs):
+Import (the merged resolve-ingest app), Library, Runs, Markers, Output/Resolve.
+The timing workflow is still a Python script inside DaVinci Resolve Studio. It is moving to a
 standalone Rust tool (`docs/decisions/0001-standalone-rust-tool.md`): an overlay
 rendered to one transparent video file, then markers found automatically from
 the video. The Python script stays usable, bug fixes only, until Rust covers the
 workflow.
 
 ## Commands
-- `cargo test` — Rust tests. Before pushing: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`.
+- `make install` — builds and installs `ghost-run` + `rtimer` to `~/.local/bin` with a launcher and icon (`Exec` goes through `distrobox enter $CONTAINER_ID` when built in a distrobox).
+- `cargo test` — Rust tests (the app needs `libgtk-4-dev libadwaita-1-dev`; screenshots under `xvfb-run` with `GSK_RENDERER=cairo` and a throwaway `XDG_CONFIG_HOME`/`XDG_DATA_HOME`). Before pushing: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`.
 - `cargo build -p timer-cli && scripts/parity.sh` — runs the Python and Rust CLIs on `examples/` and `tests/fixtures/` databases and fails on any difference in output or in the files they write.
 - `python -m unittest discover -s tests` — Python tests (needs `PyYAML`, `Pillow`: `pip install -r requirements-resolve.txt`). The devbox has no pip: unpack the two wheels from PyPI into a temp dir and set `PYTHONPATH` to it.
 - CI (`.github/workflows/ci.yml`, GitHub-hosted runners) runs Python 3.10 and 3.13 tests, Rust fmt/clippy/tests, and the parity check. CI is the gate.
@@ -38,6 +42,9 @@ sensible option and list assumptions in the PR description.
 8. **Report:** PR number, merge commit, assumptions, issues filed.
 
 ## Layout
+- `crates/app/` — the desktop app (`ghost-run`): no arguments opens the window; subcommands are the headless import commands. `src/ui/` is the old resolve-ingest window, now the Import page.
+- `crates/ingest/` — import core, merged from `glib/resolve-ingest` with its history (MIT, its own `LICENSE`): discovery, verified CIFS archive copies, PCM editing MOVs, SQLite journal, child-process supervision. Settings/journal paths keep the `resolve-ingest` names so existing setups carry over. Docs and validation evidence: `docs/ingest/`.
+- `packaging/` — launcher `.desktop` (`@EXEC@` filled in by the Makefile) and icon.
 - `crates/timer-core/` — Rust core: `models` (courses, runs), `database` (YAML v2 load/save; `yaml.rs` writes PyYAML's exact layout and quoting), `capture_time`, `markers`, `timing`, `matching` (clip → stored run; the fingerprint hash matches Python's byte for byte), `stats` (best/optimal lap), `validation`, `py` (Python-compatible coercions, `repr`, JSON escaping, half-even rounding).
 - `crates/timer-core/src/overlay.rs` — what the overlay shows for a clip (`overlay_payload`: compared only with runs captured before it, never its own stored run), its rows, text and delta colours.
 - `crates/timer-render/` — draws overlay frames (the Fusion comp's layout and colours, minus the panel blur, which a separate file can't do; bundled JetBrains Mono, OFL) and encodes them with ffmpeg: only the panel is drawn and piped, and ffmpeg pads it to the full transparent frame (`Output::region`); ProRes 4444 with alpha (`prores_aw`, ~4x faster than `prores_ks`; ffmpeg's pad step is single-threaded at ~90 fps at 4K, so `encode::plan` splits a render across ffmpeg processes, each encoding a stretch, joined losslessly by `concat`; processes × threads are planned to fit half the free memory (~660 MB a process + ~230 MB a thread at 4K): unplanned parallel ffmpegs once ran the 8 GB devbox out of memory. Never test heavy renders there without a memory watchdog) carrying the clip's timecode, or an image sequence numbered by clip frame.

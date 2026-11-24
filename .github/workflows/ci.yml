@@ -44,6 +44,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The app (crates/app) builds against GTK4 and libadwaita. The .debs are
+      # cached, so apt's slow downloads and triggers run only when this changes.
+      - name: Install GTK
+        timeout-minutes: 8
+        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+        with:
+          packages: libgtk-4-dev libadwaita-1-dev
+          version: gtk-v1
       # The render and auto-markers tests need ffmpeg (with prores_aw and
       # libx264) and must not skip here. A static build from GitHub releases,
       # cached, instead of apt: apt took 8+ minutes and once hung.
