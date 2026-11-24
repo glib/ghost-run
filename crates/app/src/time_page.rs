@@ -385,7 +385,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             load_database(&p);
             show(&p);
         }
-        Change::Render => {}
+        Change::Render | Change::Resolve => {}
     });
 
     let p = page.clone();

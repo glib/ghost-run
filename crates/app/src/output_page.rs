@@ -3,6 +3,10 @@
 //! renders in turn on a worker thread, using every core the machine's memory
 //! allows ([`timer_render::encode::plan`]). A finished overlay is recorded in
 //! the library, so the Resolve bridge can find it.
+//!
+//! Runs sent to Resolve from the Runs page come here too: overlays already
+//! rendered for the run's current markers are used as they are, the rest are
+//! rendered first, then they all go to Resolve together.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,7 +25,7 @@ use timer_core::TimerDatabase;
 use timer_core::overlay::{ComparisonMode, OverlayPayload, SelectedRun, overlay_payload};
 use timer_render::job::{self, RenderError, Spec};
 
-use crate::shared::{Change, Shared};
+use crate::shared::{Change, ResolveTarget, Shared};
 
 /// A render for the worker.
 struct Job {
@@ -57,9 +61,18 @@ struct Item {
     status: Status,
 }
 
+/// What to do in Resolve once a set of runs has its overlays.
+#[derive(Debug, Clone, PartialEq)]
+enum Send {
+    Timeline,
+    NewProject(String),
+}
+
 struct State {
     items: Vec<Item>,
     running: bool,
+    /// Runs waiting on their renders before going to Resolve.
+    pending: Option<(Send, Vec<String>)>,
 }
 
 #[derive(Clone)]
@@ -197,6 +210,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         state: Rc::new(RefCell::new(State {
             items: Vec::new(),
             running: false,
+            pending: None,
         })),
         jobs: jobs.0,
         cancel: jobs.1,
@@ -237,7 +251,16 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     check.connect_clicked(move |_| ask_resolve(&p, None));
     let p = page.clone();
-    new_project.connect_clicked(move |_| new_project_dialog(&p));
+    new_project.connect_clicked(move |_| {
+        let items = finished(&p);
+        if items.is_empty() {
+            return;
+        }
+        let p2 = p.clone();
+        new_project_dialog(&p, items.len(), move |name| {
+            make_project(&p2, name, items.clone())
+        });
+    });
     let p = page.clone();
     add_to_resolve.connect_clicked(move |_| {
         let items = finished(&p);
@@ -261,8 +284,16 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     stop.connect_clicked(move |_| {
         p.cancel.store(true, Ordering::Relaxed);
-        p.state.borrow_mut().running = false;
+        let mut s = p.state.borrow_mut();
+        s.running = false;
+        let dropped = s.pending.take().is_some();
+        drop(s);
         p.status.set_text("Stopping…");
+        if dropped {
+            p.resolve_status.add_css_class("error");
+            p.resolve_status
+                .set_text("Stopped: nothing was sent to Resolve.");
+        }
     });
     let p = page.clone();
     clear.connect_clicked(move |_| {
@@ -279,6 +310,20 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             queue(&p, &ids);
             p.state.borrow_mut().running = true;
             next(&p);
+        }
+        if change == Change::Resolve
+            && let Some((target, ids)) = p.shared.take_runs_for_resolve()
+            && !ids.is_empty()
+        {
+            match target {
+                ResolveTarget::Timeline => begin(&p, Send::Timeline, ids),
+                ResolveTarget::NewProject => {
+                    let (p2, n) = (p.clone(), ids.len());
+                    new_project_dialog(&p, n, move |name| {
+                        begin(&p2, Send::NewProject(name), ids.clone())
+                    });
+                }
+            }
         }
         show_folder(&p);
     });
@@ -390,6 +435,7 @@ fn handle(p: &Page, reply: Reply) {
             }
             drop(s);
             next(p);
+            settle(p);
         }
         Reply::Resolve(result) => {
             p.resolve_buttons.set_sensitive(true);
@@ -467,18 +513,13 @@ fn add_overlays(
     Ok(describe_added(&reply))
 }
 
-/// Asks for the new project's name, then makes it.
-fn new_project_dialog(p: &Page) {
-    let items = finished(p);
-    if items.is_empty() {
-        return;
-    }
+/// Asks for the new project's name for `count` runs, then calls `create`.
+fn new_project_dialog(p: &Page, count: usize, create: impl Fn(String) + 'static) {
     let dialog = adw::AlertDialog::new(
         Some("New Resolve project"),
         Some(&format!(
-            "{} {} back to back, in the order ridden: each clip from a second before Start to the end of its overlay on V1, the overlay above it on V2, proxies linked. It starts from Resolve's default project settings, at the first clip's frame rate and size.",
-            items.len(),
-            if items.len() == 1 { "run" } else { "runs" }
+            "{count} {} back to back, in the order ridden: each clip from a second before Start to the end of its overlay on V1, the overlay above it on V2, proxies linked. It starts from Resolve's default project settings, at the first clip's frame rate and size.",
+            if count == 1 { "run" } else { "runs" }
         )),
     );
     let entry = gtk::Entry::new();
@@ -493,28 +534,145 @@ fn new_project_dialog(p: &Page) {
     dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
     dialog.set_default_response(Some("create"));
     dialog.set_close_response("cancel");
-    let window = p.shared.window.clone();
-    let p = p.clone();
     dialog.connect_response(None, move |_, response| {
-        if response != "create" {
+        if response == "create" {
+            create(entry.text().trim().to_owned());
+        }
+    });
+    dialog.present(Some(&p.shared.window));
+}
+
+/// Makes a Resolve project from these overlays, in the order ridden.
+fn make_project(p: &Page, name: String, mut items: Vec<(String, PathBuf, PathBuf)>) {
+    let container = p.shared.settings().resolve_container.clone();
+    let order = ride_order(p);
+    items.sort_by_key(|(id, _, _)| order.get(id).cloned().unwrap_or_default());
+    let tx = p.replies.clone();
+    p.resolve_buttons.set_sensitive(false);
+    p.resolve_status.remove_css_class("error");
+    p.resolve_status.set_text("Making the project in Resolve…");
+    std::thread::spawn(move || {
+        let bridge = crate::resolve::Bridge::new(container.as_deref());
+        let result = create_project(&bridge, &name, &items).map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Reply::Resolve(result));
+    });
+}
+
+/// Runs sent to Resolve: lists them, renders the ones without an up-to-date
+/// overlay, and sends them all once those are done ([`settle`]).
+fn begin(p: &Page, send: Send, ids: Vec<String>) {
+    let Some(path) = p.shared.settings().run_database.clone() else {
+        p.status
+            .set_text("Choose your run database first (the gear in the sidebar).");
+        return;
+    };
+    let db = match TimerDatabase::load(&path) {
+        Ok(db) => db,
+        Err(e) => {
+            p.status
+                .set_text(&format!("The run database couldn't be read: {e}"));
             return;
         }
-        let name = entry.text().trim().to_owned();
-        let container = p.shared.settings().resolve_container.clone();
-        let order = ride_order(&p);
-        let mut items = items.clone();
-        items.sort_by_key(|(id, _, _)| order.get(id).cloned().unwrap_or_default());
-        let tx = p.replies.clone();
-        p.resolve_buttons.set_sensitive(false);
-        p.resolve_status.remove_css_class("error");
-        p.resolve_status.set_text("Making the project in Resolve…");
-        std::thread::spawn(move || {
-            let bridge = crate::resolve::Bridge::new(container.as_deref());
-            let result = create_project(&bridge, &name, &items).map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Reply::Resolve(result));
-        });
+    };
+    let renders = Library::open_default()
+        .and_then(|l| l.renders())
+        .unwrap_or_default();
+    let (ready, stale) = split_rendered(&ids, &db, &renders);
+    queue(p, &ids);
+    let mut s = p.state.borrow_mut();
+    for r in &ready {
+        if let Some(item) = s.items.iter_mut().find(|i| i.run_id == r.run_id)
+            && item.status == Status::Queued
+        {
+            item.clip = Some(r.clip.clone());
+            item.out = Some(r.overlay.clone());
+            item.status = Status::Done(format!(
+                "Already rendered; starts at clip frame {} (timecode {})",
+                r.first_frame, r.timecode
+            ));
+        }
+    }
+    s.pending = Some((send, ids));
+    if !stale.is_empty() {
+        s.running = true;
+    }
+    drop(s);
+    p.resolve_status.remove_css_class("error");
+    p.resolve_status.set_text(&match stale.len() {
+        0 => "Sending the runs to Resolve…".to_owned(),
+        n => format!(
+            "Rendering {n} {} first, then sending the runs to Resolve…",
+            if n == 1 { "overlay" } else { "overlays" }
+        ),
     });
-    dialog.present(Some(&window));
+    next(p);
+    settle(p);
+}
+
+/// Once none of the pending runs is waiting or rendering, sends the ones
+/// with an overlay to Resolve.
+fn settle(p: &Page) {
+    let mut s = p.state.borrow_mut();
+    let Some((_, ids)) = &s.pending else {
+        return;
+    };
+    let waiting = s.items.iter().any(|i| {
+        ids.contains(&i.run_id) && matches!(i.status, Status::Queued | Status::Rendering(_))
+    });
+    if waiting {
+        return;
+    }
+    let (send, ids) = s.pending.take().expect("checked");
+    let items: Vec<_> = s
+        .items
+        .iter()
+        .filter(|i| ids.contains(&i.run_id) && matches!(i.status, Status::Done(_)))
+        .filter_map(|i| Some((i.run_id.clone(), i.clip.clone()?, i.out.clone()?)))
+        .collect();
+    drop(s);
+    let missing = ids.len() - items.len();
+    if items.is_empty() {
+        p.resolve_status.add_css_class("error");
+        p.resolve_status.set_text(
+            "None of the runs has an overlay, so nothing was sent to Resolve: see the list for why.",
+        );
+        return;
+    }
+    if missing > 0 {
+        p.status.set_text(&format!(
+            "{missing} of the {} runs couldn't be rendered and were left out (see the list).",
+            ids.len()
+        ));
+    }
+    match send {
+        Send::Timeline => ask_resolve(p, Some(items)),
+        Send::NewProject(name) => make_project(p, name, items),
+    }
+}
+
+/// Whether `done` is the overlay for `run` as it is now: the file is there
+/// and the run's markers haven't changed since.
+fn is_current(done: &Rendered, run: &timer_core::models::RunRecord) -> bool {
+    done.overlay.exists() && done.fingerprint == run.fingerprint.clone().unwrap_or_default()
+}
+
+/// `ids` split into the overlays already rendered and up to date, and the
+/// runs that need rendering (in the order given).
+fn split_rendered(
+    ids: &[String],
+    db: &TimerDatabase,
+    renders: &HashMap<String, Rendered>,
+) -> (Vec<Rendered>, Vec<String>) {
+    let mut ready = Vec::new();
+    let mut stale = Vec::new();
+    for id in ids {
+        let run = db.runs.iter().find(|r| &r.id == id);
+        match (run, renders.get(id)) {
+            (Some(run), Some(done)) if is_current(done, run) => ready.push(done.clone()),
+            _ => stale.push(id.clone()),
+        }
+    }
+    (ready, stale)
 }
 
 /// Run id → when it was ridden, to put runs in order.
@@ -781,13 +939,7 @@ fn add_unrendered(p: &Page) {
         .runs
         .iter()
         .filter(|r| r.committed && !r.ignored)
-        .filter(|r| match renders.get(&r.id) {
-            Some(done) => {
-                !done.overlay.exists()
-                    || done.fingerprint != r.fingerprint.clone().unwrap_or_default()
-            }
-            None => true,
-        })
+        .filter(|r| !renders.get(&r.id).is_some_and(|done| is_current(done, r)))
         .map(|r| r.id.clone())
         .collect();
     let n = ids.len();
@@ -944,6 +1096,60 @@ fn button(title: &str) -> gtk::Button {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn uses_overlays_that_are_up_to_date_and_renders_the_rest() {
+        use timer_core::models::RunRecord;
+        let dir = tempfile::tempdir().unwrap();
+        let run = |id: &str, fp: &str| {
+            let mut r = RunRecord::new(id, "c", "2026-11-24", "a.mp4", 30.0, Default::default());
+            r.fingerprint = Some(fp.into());
+            r
+        };
+        let db = TimerDatabase {
+            courses: vec![],
+            runs: vec![
+                run("fresh", "f1"),
+                run("moved", "m2"),
+                run("gone", "g1"),
+                run("new", "n1"),
+            ],
+        };
+        let done = |id: &str, fp: &str, exists: bool| {
+            let overlay = dir.path().join(format!("{id}.overlay.mov"));
+            if exists {
+                std::fs::write(&overlay, b"x").unwrap();
+            }
+            Rendered {
+                run_id: id.into(),
+                clip: dir.path().join("a.mp4"),
+                overlay,
+                first_frame: 0,
+                timecode: "00:00:00:00".into(),
+                fingerprint: fp.into(),
+                rendered_ms: 0,
+            }
+        };
+        let renders: HashMap<String, Rendered> = [
+            done("fresh", "f1", true),
+            // Its markers changed since it was rendered.
+            done("moved", "m1", true),
+            // The file was deleted.
+            done("gone", "g1", false),
+        ]
+        .into_iter()
+        .map(|r| (r.run_id.clone(), r))
+        .collect();
+        let ids: Vec<String> = ["new", "fresh", "moved", "gone", "not-in-db"]
+            .map(String::from)
+            .into();
+        let (ready, stale) = split_rendered(&ids, &db, &renders);
+        assert_eq!(
+            ready.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
+            ["fresh"]
+        );
+        assert_eq!(stale, ["new", "moved", "gone", "not-in-db"]);
+    }
 
     #[test]
     fn says_what_the_new_project_has() {

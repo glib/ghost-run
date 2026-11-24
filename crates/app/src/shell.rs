@@ -85,7 +85,7 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         crate::shared::Change::TimeClip => {
             select(&list2, "time");
         }
-        crate::shared::Change::Render => {
+        crate::shared::Change::Render | crate::shared::Change::Resolve => {
             select(&list2, "output");
         }
         _ => {}

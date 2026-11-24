@@ -16,7 +16,7 @@ use timer_core::edit::{self, EditError};
 use timer_core::file::{DatabaseFile, SaveError};
 use timer_core::timing::{format_delta, format_duration};
 
-use crate::shared::{Change, Shared};
+use crate::shared::{Change, ResolveTarget, Shared};
 
 struct State {
     file: Option<DatabaseFile>,
@@ -96,6 +96,37 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let include = button("Count again");
     let render = button("Render overlays");
     render.set_tooltip_text(Some("Render these runs' timer overlays (Output page)"));
+    let to_resolve = button("");
+    let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    face.append(&gtk::Label::new(Some("Resolve")));
+    face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+    to_resolve.set_child(Some(&face));
+    to_resolve.set_tooltip_text(Some(
+        "Put these runs in DaVinci Resolve, rendering any overlay that's missing or out of date first",
+    ));
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let to_timeline = gtk::Button::with_label("Add to open timeline");
+    to_timeline.set_tooltip_text(Some(
+        "Put each overlay on the track above its clip in Resolve's current timeline",
+    ));
+    let to_project = gtk::Button::with_label("New project…");
+    to_project.set_tooltip_text(Some(
+        "Start a Resolve project with these runs back to back: clips on V1, overlays on V2",
+    ));
+    for b in [&to_timeline, &to_project] {
+        b.add_css_class("flat");
+        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
+            l.set_xalign(0.);
+        }
+        menu.append(b);
+    }
+    let popover = gtk::Popover::new();
+    popover.set_child(Some(&menu));
+    popover.set_parent(&to_resolve);
+    let shown = popover.clone();
+    to_resolve.connect_clicked(move |_| shown.popup());
+    let parented = popover.clone();
+    to_resolve.connect_destroy(move |_| parented.unparent());
     let delete = button("Delete…");
     delete.add_css_class("destructive-action");
     for w in [
@@ -104,6 +135,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         ignore.upcast_ref(),
         include.upcast_ref(),
         render.upcast_ref(),
+        to_resolve.upcast_ref(),
         delete.upcast_ref(),
     ] {
         actions.append(w);
@@ -199,6 +231,17 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         let ids = selected(&p);
         p.shared.render_runs(ids);
     });
+    for (b, target) in [
+        (&to_timeline, ResolveTarget::Timeline),
+        (&to_project, ResolveTarget::NewProject),
+    ] {
+        let (p, popover) = (page.clone(), popover.clone());
+        b.connect_clicked(move |_| {
+            popover.popdown();
+            let ids = selected(&p);
+            p.shared.send_to_resolve(target, ids);
+        });
+    }
     let p = page.clone();
     shared.subscribe(move |change| {
         // Our own saves are already shown; other pages' (and new settings) are not.
