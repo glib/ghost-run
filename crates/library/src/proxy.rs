@@ -7,6 +7,10 @@
 //! and timecode, and the same rotation flag (frames are not turned upright;
 //! like the clip, the player does that). [`verify`] checks this, and a proxy
 //! that fails is made again.
+//!
+//! One ffmpeg can't keep a big machine busy (its scaler is the slow step,
+//! and a proxy is a light encode), so several clips are made at once:
+//! [`plan`] picks how many, and how many threads each gets.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -72,12 +76,81 @@ pub fn verify(clip_path: &Path, clip: &MediaInfo, proxy: &Path) -> Result<()> {
     Ok(())
 }
 
+/// How many proxies to make at once, and the threads each ffmpeg gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    pub jobs: usize,
+    pub threads: usize,
+}
+
+/// Threads one proxy job keeps busy well (decode, scale and ProRes).
+const THREADS_PER_JOB: usize = 4;
+/// At most this many at once: past it, the disk is the limit.
+const MAX_JOBS: usize = 8;
+/// Measured for a 4K 10-bit HEVC clip: about 420 MB a job plus 46 MB a
+/// decoder thread (602 MB at 4 threads, 1154 MB at 16).
+const JOB_MB_4K: u64 = 420;
+const THREAD_MB_4K: u64 = 46;
+
+/// The plan for `clips` clips up to `width × height` on this machine.
+pub fn plan(width: u32, height: u32, clips: usize) -> Plan {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    plan_for(width, height, clips, cores, available_memory())
+}
+
+/// Spreads `cores` over jobs of about [`THREADS_PER_JOB`] threads, as many
+/// as there are clips, within half the `available` memory.
+pub fn plan_for(
+    width: u32,
+    height: u32,
+    clips: usize,
+    cores: usize,
+    available: Option<u64>,
+) -> Plan {
+    let cores = cores.max(1);
+    let area = (f64::from(width) * f64::from(height) / (3840.0 * 2160.0)).max(0.05);
+    let mb = |threads: usize| -> u64 {
+        ((JOB_MB_4K + THREAD_MB_4K * threads as u64) as f64 * area) as u64 * 1024 * 1024
+    };
+    let budget = available.map_or(u64::MAX, |a| a / 2);
+    let mut jobs = (cores / THREADS_PER_JOB)
+        .clamp(1, MAX_JOBS)
+        .min(clips.max(1));
+    while jobs > 1 && jobs as u64 * mb(cores / jobs) > budget {
+        jobs -= 1;
+    }
+    Plan {
+        jobs,
+        threads: (cores / jobs).max(1),
+    }
+}
+
+/// `MemAvailable` from `/proc/meminfo`, in bytes.
+fn available_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 /// Makes and checks the clip's proxy; `progress` gets 0.0–1.0 as it goes.
 /// It's written to a hidden partial file first, so a cancelled or failed
 /// encode never leaves a proxy Resolve would pick up.
 pub fn make(
     clip_path: &Path,
     clip: &MediaInfo,
+    cancel: &Cancel,
+    progress: impl FnMut(f64),
+) -> Result<PathBuf> {
+    make_with(clip_path, clip, 0, cancel, progress)
+}
+
+/// [`make`] with `threads` for each of ffmpeg's decoder, scaler and encoder
+/// (`0`: ffmpeg's own choice, and a one-thread scaler).
+pub fn make_with(
+    clip_path: &Path,
+    clip: &MediaInfo,
+    threads: usize,
     cancel: &Cancel,
     mut progress: impl FnMut(f64),
 ) -> Result<PathBuf> {
@@ -91,15 +164,27 @@ pub fn make(
     let total = probe::frames(clip_path, clip).ok().filter(|n| *n > 0);
     let (w, h) = proxy_size(clip);
 
+    let threads_arg = threads.to_string();
+    let scale = if threads > 0 {
+        format!("scale={w}:{h}:threads={threads}")
+    } else {
+        format!("scale={w}:{h}")
+    };
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
-        // Keep the frames as stored, with the rotation flag carried over.
-        .arg("-noautorotate")
+    cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"]);
+    if threads > 0 {
+        cmd.args(["-threads", &threads_arg]);
+    }
+    // Keep the frames as stored, with the rotation flag carried over.
+    cmd.arg("-noautorotate")
         .arg("-i")
         .arg(clip_path)
         .args(["-map", "0:v:0", "-map", "0:a?"])
-        .args(["-vf", &format!("scale={w}:{h}")])
-        .args(["-c:v", "prores_aw", "-profile:v", "0", "-vendor", "apl0"])
+        .args(["-vf", &scale]);
+    if threads > 0 {
+        cmd.args(["-threads", &threads_arg]);
+    }
+    cmd.args(["-c:v", "prores_aw", "-profile:v", "0", "-vendor", "apl0"])
         .args(["-c:a", "pcm_s16le"])
         // One output frame per input frame, so frame numbers match the clip's.
         .args(["-fps_mode", "passthrough"])
@@ -230,6 +315,29 @@ pub fn check_ffmpeg() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plans_jobs_by_cores_clips_and_memory() {
+        const GB: u64 = 1 << 30;
+        let plan = |cores, clips, gb: Option<u64>| {
+            let p = plan_for(3840, 2160, clips, cores, gb.map(|g| g * GB));
+            (p.jobs, p.threads)
+        };
+        // A 4-core box: one job with every core.
+        assert_eq!(plan(4, 10, Some(6)), (1, 4));
+        // 32 threads, plenty of memory: eight jobs of four.
+        assert_eq!(plan(32, 20, Some(32)), (8, 4));
+        // Only three clips: three jobs, sharing the cores.
+        assert_eq!(plan(32, 3, Some(32)), (3, 10));
+        // Little memory: fewer jobs (a 4 GB budget fits six of about 650 MB).
+        assert_eq!(plan(32, 20, Some(8)), (6, 5));
+        assert_eq!(plan(32, 20, Some(1)), (1, 32));
+        // Unknown memory: by cores.
+        assert_eq!(plan(16, 20, None), (4, 4));
+        // Smaller clips take less memory.
+        let hd = plan_for(1920, 1080, 20, 32, Some(8 * GB));
+        assert_eq!((hd.jobs, hd.threads), (8, 4));
+    }
 
     #[test]
     fn proxies_go_in_a_proxy_folder_beside_the_clip() {
