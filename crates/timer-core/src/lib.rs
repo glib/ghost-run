@@ -10,6 +10,7 @@ pub mod database;
 pub mod markers;
 pub mod matching;
 pub mod models;
+pub mod overlay;
 pub mod py;
 pub mod stats;
 pub mod timing;

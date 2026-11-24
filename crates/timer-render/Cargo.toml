@@ -1,0 +1,16 @@
+[package]
+name = "timer-render"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Draws the timer overlay into transparent video frames and encodes them with ffmpeg"
+# The bundled JetBrains Mono font is under the SIL Open Font License (fonts/OFL.txt).
+
+[dependencies]
+fontdue = "0.9"
+serde_json.workspace = true
+thiserror.workspace = true
+timer-core = { path = "../timer-core" }
+
+[lints]
+workspace = true
