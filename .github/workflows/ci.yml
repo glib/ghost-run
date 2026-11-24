@@ -44,14 +44,26 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The render test encodes a small overlay with ffmpeg; it must not skip here.
-      - name: Install ffmpeg
-        timeout-minutes: 10
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      # The render and auto-markers tests need ffmpeg (with prores_aw and
+      # libx264) and must not skip here. A static build from GitHub releases,
+      # cached, instead of apt: apt took 8+ minutes and once hung.
+      - name: Cache ffmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-n8.1-linux64-gpl-v1
+      - name: Download ffmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 5
         run: |
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo -E apt-get -o Acquire::Retries=3 install -y --no-install-recommends ffmpeg
+          mkdir -p ~/ffmpeg
+          curl -fsSL --retry 3 https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz \
+            | tar -xJ -C ~/ffmpeg --strip-components=1
+      - name: Put ffmpeg on PATH
+        run: |
+          echo "$HOME/ffmpeg/bin" >> "$GITHUB_PATH"
+          ~/ffmpeg/bin/ffmpeg -hide_banner -encoders | grep -E "prores_aw|libx264"
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
