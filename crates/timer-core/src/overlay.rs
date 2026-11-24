@@ -30,6 +30,23 @@ pub struct SelectedRun {
     pub source_path: Option<String>,
 }
 
+impl SelectedRun {
+    /// A stored run, to render its overlay.
+    pub fn from_run(run: &crate::models::RunRecord) -> Self {
+        Self {
+            course_id: run.course_id.clone(),
+            filename: run.filename.clone(),
+            source_fps: run.source_fps,
+            markers: crate::markers::raw_markers(&run.marker_frames),
+            clip_id: run.clip_id.clone(),
+            run_date: Some(run.date.clone()),
+            capture_time: run.capture_time.clone(),
+            capture_time_source: run.capture_time_source.clone(),
+            source_path: run.source_path.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComparisonMode {
     BestLap,

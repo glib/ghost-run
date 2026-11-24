@@ -1,0 +1,629 @@
+//! The Output page: a queue of runs whose timer overlays to render. Runs come
+//! from the Runs page (Render overlays) or "Add runs without overlays"; each
+//! renders in turn on a worker thread, using every core the machine's memory
+//! allows ([`timer_render::encode::plan`]). A finished overlay is recorded in
+//! the library, so the Resolve bridge can find it.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use adw::prelude::*;
+use gtk::{gio, glib};
+use library::settings::Comparison;
+use library::{Library, Rendered, auto, overlays};
+use timer_core::TimerDatabase;
+use timer_core::overlay::{ComparisonMode, OverlayPayload, SelectedRun, overlay_payload};
+use timer_render::job::{self, RenderError, Spec};
+
+use crate::shared::{Change, Shared};
+
+/// A render for the worker.
+struct Job {
+    run_id: String,
+    payload: OverlayPayload,
+    clip: PathBuf,
+    out: PathBuf,
+    fingerprint: String,
+}
+
+enum Reply {
+    Progress(String, f64),
+    Finished(String, Result<Rendered, String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Status {
+    Queued,
+    Rendering(f64),
+    Done(String),
+    Failed(String),
+    Stopped,
+}
+
+#[derive(Debug, Clone)]
+struct Item {
+    run_id: String,
+    course: String,
+    clip: Option<PathBuf>,
+    out: Option<PathBuf>,
+    status: Status,
+}
+
+struct State {
+    items: Vec<Item>,
+    running: bool,
+}
+
+#[derive(Clone)]
+struct Page {
+    shared: Shared,
+    state: Rc<RefCell<State>>,
+    jobs: mpsc::Sender<Job>,
+    cancel: Arc<AtomicBool>,
+    views: gtk::Stack,
+    list: gtk::ListBox,
+    /// Run id → its row's progress bar, to update in place.
+    bars: Rc<RefCell<HashMap<String, gtk::ProgressBar>>>,
+    folder: gtk::Label,
+    start: gtk::Button,
+    stop: gtk::Button,
+    clear: gtk::Button,
+    status: gtk::Label,
+}
+
+pub fn page(shared: &Shared) -> gtk::Widget {
+    let (jobs, replies) = worker();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let header = adw::HeaderBar::new();
+    header.set_title_widget(Some(&adw::WindowTitle::new("Output", "")));
+    root.append(&header);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    content.add_css_class("content");
+    content.set_vexpand(true);
+
+    let options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    options.append(&label("Compare with", ""));
+    let compare = gtk::DropDown::from_strings(&["Best lap so far", "Optimal lap so far"]);
+    compare.update_property(&[gtk::accessible::Property::Label(
+        "What each overlay compares the run with",
+    )]);
+    compare.set_tooltip_text(Some(
+        "Best lap: the fastest run before this one. Optimal: the fastest of each sector before it, added up.",
+    ));
+    options.append(&compare);
+    let folder = label("", "dim-label");
+    folder.set_hexpand(true);
+    folder.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    folder.set_margin_start(12);
+    options.append(&folder);
+    let change_folder = button("Change…");
+    change_folder.set_tooltip_text(Some("Choose where overlays go (Settings)"));
+    options.append(&change_folder);
+    content.append(&options);
+
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let add = button("Add runs without overlays");
+    add.set_tooltip_text(Some(
+        "Queue every counted run whose overlay hasn't been rendered, or is out of date",
+    ));
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    let clear = button("Clear finished");
+    let stop = button("Stop");
+    stop.set_visible(false);
+    let start = button("Render");
+    start.add_css_class("suggested-action");
+    toolbar.append(&add);
+    toolbar.append(&spacer);
+    toolbar.append(&clear);
+    toolbar.append(&stop);
+    toolbar.append(&start);
+    content.append(&toolbar);
+
+    let views = gtk::Stack::new();
+    views.set_vexpand(true);
+    let empty = adw::StatusPage::new();
+    empty.set_icon_name(Some("video-x-generic-symbolic"));
+    empty.set_title("Nothing to render");
+    empty.set_description(Some(
+        "Tick runs on the Runs page and press Render overlays, or add every run that has no overlay yet.",
+    ));
+    views.add_named(&empty, Some("empty"));
+    let list = gtk::ListBox::new();
+    list.add_css_class("boxed-list");
+    list.set_selection_mode(gtk::SelectionMode::None);
+    list.set_valign(gtk::Align::Start);
+    let scroller = gtk::ScrolledWindow::builder()
+        .child(&list)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    views.add_named(&scroller, Some("list"));
+    content.append(&views);
+    root.append(&content);
+
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    footer.add_css_class("footer");
+    let status = label("", "");
+    status.set_wrap(true);
+    status.set_hexpand(true);
+    footer.append(&status);
+    root.append(&footer);
+
+    let page = Page {
+        shared: shared.clone(),
+        state: Rc::new(RefCell::new(State {
+            items: Vec::new(),
+            running: false,
+        })),
+        jobs: jobs.0,
+        cancel: jobs.1,
+        views,
+        list,
+        bars: Rc::default(),
+        folder,
+        start: start.clone(),
+        stop: stop.clone(),
+        clear: clear.clone(),
+        status,
+    };
+
+    compare.set_selected(match shared.settings().comparison {
+        Comparison::BestLap => 0,
+        Comparison::Optimal => 1,
+    });
+    let p = page.clone();
+    compare.connect_selected_notify(move |d| {
+        let mode = if d.selected() == 1 {
+            Comparison::Optimal
+        } else {
+            Comparison::BestLap
+        };
+        if p.shared.settings().comparison != mode {
+            let _ = p.shared.update(|s| s.comparison = mode);
+        }
+    });
+    let p = page.clone();
+    change_folder.connect_clicked(move |_| crate::settings_dialog::open(&p.shared));
+    let p = page.clone();
+    add.connect_clicked(move |_| add_unrendered(&p));
+    let p = page.clone();
+    start.connect_clicked(move |_| {
+        let mut s = p.state.borrow_mut();
+        s.running = true;
+        // Stopped renders start again from the beginning.
+        for item in &mut s.items {
+            if item.status == Status::Stopped {
+                item.status = Status::Queued;
+            }
+        }
+        drop(s);
+        next(&p);
+    });
+    let p = page.clone();
+    stop.connect_clicked(move |_| {
+        p.cancel.store(true, Ordering::Relaxed);
+        p.state.borrow_mut().running = false;
+        p.status.set_text("Stopping…");
+    });
+    let p = page.clone();
+    clear.connect_clicked(move |_| {
+        p.state
+            .borrow_mut()
+            .items
+            .retain(|i| matches!(i.status, Status::Queued | Status::Rendering(_)));
+        show(&p);
+    });
+    let p = page.clone();
+    shared.subscribe(move |change| {
+        if change == Change::Render {
+            let ids = p.shared.take_runs_to_render();
+            queue(&p, &ids);
+            p.state.borrow_mut().running = true;
+            next(&p);
+        }
+        show_folder(&p);
+    });
+
+    let p = page.clone();
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        for reply in replies.try_iter() {
+            handle(&p, reply);
+        }
+        glib::ControlFlow::Continue
+    });
+
+    show_folder(&page);
+    show(&page);
+    root.upcast()
+}
+
+type Worker = ((mpsc::Sender<Job>, Arc<AtomicBool>), mpsc::Receiver<Reply>);
+
+/// Renders each job sent, one at a time.
+fn worker() -> Worker {
+    let (tx, jobs) = mpsc::channel::<Job>();
+    let (replies, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
+    std::thread::spawn(move || {
+        for job in jobs {
+            let id = job.run_id.clone();
+            let result = render(&job, &stop, &replies);
+            if replies.send(Reply::Finished(id, result)).is_err() {
+                break;
+            }
+        }
+    });
+    ((tx, cancel), rx)
+}
+
+fn render(
+    job: &Job,
+    cancel: &AtomicBool,
+    replies: &mpsc::Sender<Reply>,
+) -> Result<Rendered, String> {
+    let info = timer_render::encode::probe(&job.clip)
+        .map_err(|e| format!("{} can't be read: {e}", job.clip.display()))?;
+    if let Some(dir) = job.out.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    }
+    let spec = Spec::new(&job.payload, &job.out, Some(&info));
+    let id = job.run_id.clone();
+    let report = job::render(
+        &spec,
+        &|done, total| {
+            let _ = replies.send(Reply::Progress(id.clone(), done as f64 / total as f64));
+        },
+        cancel,
+    )
+    .map_err(|e| match e {
+        RenderError::Cancelled => "stopped".to_owned(),
+        e => e.to_string(),
+    })?;
+    let rendered = Rendered {
+        run_id: job.run_id.clone(),
+        clip: job.clip.clone(),
+        overlay: job.out.clone(),
+        first_frame: report.first,
+        timecode: report.timecode.clone(),
+        fingerprint: job.fingerprint.clone(),
+        rendered_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    Library::open_default()
+        .and_then(|l| l.set_rendered(&rendered))
+        .map_err(|e| format!("rendered, but not recorded in the library: {e:#}"))?;
+    Ok(rendered)
+}
+
+fn handle(p: &Page, reply: Reply) {
+    match reply {
+        Reply::Progress(id, fraction) => {
+            if let Some(item) = p
+                .state
+                .borrow_mut()
+                .items
+                .iter_mut()
+                .find(|i| i.run_id == id)
+            {
+                item.status = Status::Rendering(fraction);
+            }
+            if let Some(bar) = p.bars.borrow().get(&id) {
+                bar.set_fraction(fraction);
+            }
+        }
+        Reply::Finished(id, result) => {
+            let mut s = p.state.borrow_mut();
+            if let Some(item) = s.items.iter_mut().find(|i| i.run_id == id) {
+                item.status = match result {
+                    Ok(r) => Status::Done(format!(
+                        "Starts at clip frame {} (timecode {})",
+                        r.first_frame, r.timecode
+                    )),
+                    Err(e) if e == "stopped" => Status::Stopped,
+                    Err(e) => Status::Failed(e),
+                };
+            }
+            drop(s);
+            next(p);
+        }
+    }
+}
+
+/// Starts the next queued render, if running and nothing is rendering.
+fn next(p: &Page) {
+    let mut s = p.state.borrow_mut();
+    let busy = s
+        .items
+        .iter()
+        .any(|i| matches!(i.status, Status::Rendering(_)));
+    if busy {
+        drop(s);
+        show(p);
+        return;
+    }
+    if !s.running {
+        drop(s);
+        p.status.set_text(&summary(&p.state.borrow().items));
+        show(p);
+        return;
+    }
+    let Some(i) = s.items.iter().position(|i| i.status == Status::Queued) else {
+        s.running = false;
+        drop(s);
+        p.status.set_text(&summary(&p.state.borrow().items));
+        show(p);
+        return;
+    };
+    let run_id = s.items[i].run_id.clone();
+    drop(s);
+    match prepare(p, &run_id) {
+        Ok(job) => {
+            let mut s = p.state.borrow_mut();
+            s.items[i].clip = Some(job.clip.clone());
+            s.items[i].out = Some(job.out.clone());
+            s.items[i].status = Status::Rendering(0.0);
+            drop(s);
+            p.cancel.store(false, Ordering::Relaxed);
+            p.status.set_text(&format!("Rendering {run_id}…"));
+            let _ = p.jobs.send(job);
+            show(p);
+        }
+        Err(e) => {
+            p.state.borrow_mut().items[i].status = Status::Failed(e);
+            next(p);
+        }
+    }
+}
+
+/// The render for `run_id`, from the database and library as they are now.
+fn prepare(p: &Page, run_id: &str) -> Result<Job, String> {
+    let settings = p.shared.settings().clone();
+    let path = settings
+        .run_database
+        .ok_or("no run database is chosen (Settings)")?;
+    let db = TimerDatabase::load(&path).map_err(|e| format!("the run database: {e}"))?;
+    let run = db
+        .runs
+        .iter()
+        .find(|r| r.id == run_id)
+        .ok_or("the run is no longer in the database")?;
+    let mode = match settings.comparison {
+        Comparison::BestLap => ComparisonMode::BestLap,
+        Comparison::Optimal => ComparisonMode::Optimal,
+    };
+    let payload = overlay_payload(&db, &SelectedRun::from_run(run), mode)
+        .map_err(|e| format!("can't make its overlay: {e}"))?;
+    let clips = Library::open_default()
+        .and_then(|l| l.clips())
+        .map_err(|e| format!("{e:#}"))?;
+    let clip = auto::run_clip(run, &clips)
+        .ok_or("its clip wasn't found: add its folder in Settings, or check it's still there")?
+        .path;
+    let out = overlays::overlay_path(&clip, settings.overlay_folder.as_deref());
+    Ok(Job {
+        run_id: run_id.to_owned(),
+        payload,
+        clip,
+        out,
+        fingerprint: run.fingerprint.clone().unwrap_or_default(),
+    })
+}
+
+/// Adds runs to the queue (once each), with their course names.
+fn queue(p: &Page, ids: &[String]) {
+    let db = p
+        .shared
+        .settings()
+        .run_database
+        .clone()
+        .and_then(|path| TimerDatabase::load(&path).ok());
+    let mut s = p.state.borrow_mut();
+    for id in ids {
+        if let Some(item) = s.items.iter_mut().find(|i| &i.run_id == id) {
+            if !matches!(item.status, Status::Rendering(_)) {
+                item.status = Status::Queued;
+            }
+            continue;
+        }
+        let course = db
+            .as_ref()
+            .and_then(|db| {
+                let run = db.runs.iter().find(|r| &r.id == id)?;
+                db.course_by_id(&run.course_id).ok().map(|c| c.name.clone())
+            })
+            .unwrap_or_default();
+        s.items.push(Item {
+            run_id: id.clone(),
+            course,
+            clip: None,
+            out: None,
+            status: Status::Queued,
+        });
+    }
+}
+
+/// Queues every counted run without an up-to-date overlay.
+fn add_unrendered(p: &Page) {
+    let Some(path) = p.shared.settings().run_database.clone() else {
+        p.status
+            .set_text("Choose your run database first (the gear in the sidebar).");
+        return;
+    };
+    let db = match TimerDatabase::load(&path) {
+        Ok(db) => db,
+        Err(e) => {
+            p.status
+                .set_text(&format!("The run database couldn't be read: {e}"));
+            return;
+        }
+    };
+    let renders = Library::open_default()
+        .and_then(|l| l.renders())
+        .unwrap_or_default();
+    let ids: Vec<String> = db
+        .runs
+        .iter()
+        .filter(|r| r.committed && !r.ignored)
+        .filter(|r| match renders.get(&r.id) {
+            Some(done) => {
+                !done.overlay.exists()
+                    || done.fingerprint != r.fingerprint.clone().unwrap_or_default()
+            }
+            None => true,
+        })
+        .map(|r| r.id.clone())
+        .collect();
+    let n = ids.len();
+    queue(p, &ids);
+    p.status.set_text(&match n {
+        0 => "Every counted run's overlay is rendered and up to date.".to_owned(),
+        1 => "Added 1 run. Press Render to start.".to_owned(),
+        n => format!("Added {n} runs. Press Render to start."),
+    });
+    show(p);
+}
+
+fn summary(items: &[Item]) -> String {
+    let count = |f: fn(&Status) -> bool| items.iter().filter(|i| f(&i.status)).count();
+    let done = count(|s| matches!(s, Status::Done(_)));
+    let failed = count(|s| matches!(s, Status::Failed(_)));
+    let queued = count(|s| matches!(s, Status::Queued | Status::Stopped));
+    let mut parts = Vec::new();
+    if done > 0 {
+        parts.push(format!("{done} rendered"));
+    }
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    if queued > 0 {
+        parts.push(format!("{queued} waiting"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}.", parts.join(", "))
+    }
+}
+
+fn show_folder(p: &Page) {
+    p.folder
+        .set_text(&match &p.shared.settings().overlay_folder {
+            Some(f) => format!("Overlays go to {}", f.display()),
+            None => "Overlays go in an Overlays folder beside each clip".to_owned(),
+        });
+}
+
+/// Rebuilds the list from the state.
+fn show(p: &Page) {
+    let s = p.state.borrow();
+    p.views
+        .set_visible_child_name(if s.items.is_empty() { "empty" } else { "list" });
+    while let Some(row) = p.list.first_child() {
+        p.list.remove(&row);
+    }
+    let mut bars = p.bars.borrow_mut();
+    bars.clear();
+    for item in &s.items {
+        let row = adw::ActionRow::new();
+        row.set_title(&if item.course.is_empty() {
+            item.run_id.clone()
+        } else {
+            format!("{} · {}", item.course, item.run_id)
+        });
+        let clip = item
+            .clip
+            .as_ref()
+            .and_then(|c| c.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        let (text, class) = match &item.status {
+            Status::Queued => ("Waiting".to_owned(), ""),
+            Status::Rendering(_) => ("Rendering…".to_owned(), ""),
+            Status::Done(d) => (d.clone(), "success"),
+            Status::Failed(e) => (format!("Failed: {e}"), "error"),
+            Status::Stopped => ("Stopped".to_owned(), "warning"),
+        };
+        row.set_subtitle(&match clip {
+            Some(c) => format!("{c} · {text}"),
+            None => text,
+        });
+        row.set_subtitle_lines(3);
+        if !class.is_empty() {
+            row.add_css_class(class);
+        }
+        if let Status::Rendering(f) = item.status {
+            let bar = gtk::ProgressBar::new();
+            bar.set_fraction(f);
+            bar.set_valign(gtk::Align::Center);
+            bar.set_width_request(160);
+            row.add_suffix(&bar);
+            bars.insert(item.run_id.clone(), bar);
+        }
+        if let (Status::Done(_), Some(out)) = (&item.status, &item.out) {
+            let open = gtk::Button::from_icon_name("folder-open-symbolic");
+            open.set_tooltip_text(Some("Show the overlay in its folder"));
+            open.add_css_class("flat");
+            open.set_valign(gtk::Align::Center);
+            let (out, window) = (out.clone(), p.shared.window.clone());
+            open.connect_clicked(move |_| {
+                gtk::FileLauncher::new(Some(&gio::File::for_path(&out))).open_containing_folder(
+                    Some(&window),
+                    gio::Cancellable::NONE,
+                    |_| {},
+                );
+            });
+            row.add_suffix(&open);
+        }
+        if !matches!(item.status, Status::Rendering(_)) {
+            let remove = gtk::Button::from_icon_name("window-close-symbolic");
+            remove.set_tooltip_text(Some("Take it off the list"));
+            remove.add_css_class("flat");
+            remove.set_valign(gtk::Align::Center);
+            let (p2, id) = (p.clone(), item.run_id.clone());
+            remove.connect_clicked(move |_| {
+                p2.state.borrow_mut().items.retain(|i| i.run_id != id);
+                show(&p2);
+            });
+            row.add_suffix(&remove);
+        }
+        p.list.append(&row);
+    }
+    let rendering = s
+        .items
+        .iter()
+        .any(|i| matches!(i.status, Status::Rendering(_)));
+    let waiting = s
+        .items
+        .iter()
+        .any(|i| matches!(i.status, Status::Queued | Status::Stopped));
+    p.start.set_visible(!rendering);
+    p.start.set_sensitive(waiting);
+    p.stop.set_visible(rendering);
+    p.clear.set_sensitive(
+        s.items
+            .iter()
+            .any(|i| !matches!(i.status, Status::Queued | Status::Rendering(_))),
+    );
+}
+
+fn label(text: &str, class: &str) -> gtk::Label {
+    let l = gtk::Label::new(Some(text));
+    l.set_xalign(0.);
+    if !class.is_empty() {
+        l.add_css_class(class);
+    }
+    l
+}
+
+fn button(title: &str) -> gtk::Button {
+    let b = gtk::Button::with_label(title);
+    b.add_css_class("ingest-action");
+    b
+}

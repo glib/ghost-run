@@ -522,6 +522,7 @@ dependencies = [
  "library",
  "serde_json",
  "timer-core",
+ "timer-render",
  "tokio",
 ]
 
@@ -1375,6 +1376,7 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "serde_json",
+ "tempfile",
  "thiserror",
  "timer-core",
 ]

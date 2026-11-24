@@ -8,11 +8,13 @@
 //! - [`proxy`]: half-resolution ProRes Proxy copies in a `Proxy` folder beside
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
+//! - [`overlays`]: where rendered overlays go.
 //! - [`auto`]: placing a clip's markers from the course's reference run, and
 //!   telling which course a clip is.
 
 pub mod auto;
 pub mod frames;
+pub mod overlays;
 pub mod probe;
 pub mod proxy;
 pub mod scan;
@@ -20,7 +22,7 @@ pub mod settings;
 pub mod store;
 
 pub use probe::MediaInfo;
-pub use store::{Clip, Draft, Library, ProxyState};
+pub use store::{Clip, Draft, Library, ProxyState, Rendered};
 
 /// Set to stop a scan or a proxy encode at the next check.
 pub type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;

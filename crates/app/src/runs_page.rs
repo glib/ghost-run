@@ -94,6 +94,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         "Leave these out of best and optimal laps (they stay in the database)",
     ));
     let include = button("Count again");
+    let render = button("Render overlays");
+    render.set_tooltip_text(Some("Render these runs' timer overlays (Output page)"));
     let delete = button("Delete…");
     delete.add_css_class("destructive-action");
     for w in [
@@ -101,6 +103,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         move_to.upcast_ref(),
         ignore.upcast_ref(),
         include.upcast_ref(),
+        render.upcast_ref(),
         delete.upcast_ref(),
     ] {
         actions.append(w);
@@ -191,6 +194,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     });
     let p = page.clone();
     delete.connect_clicked(move |_| delete_dialog(&p));
+    let p = page.clone();
+    render.connect_clicked(move |_| {
+        let ids = selected(&p);
+        p.shared.render_runs(ids);
+    });
     let p = page.clone();
     shared.subscribe(move |change| {
         // Our own saves are already shown; other pages' (and new settings) are not.

@@ -6,7 +6,7 @@ use adw::prelude::*;
 /// page (the old resolve-ingest window, with its own header bar).
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
-    let pages: [(&str, &str, &str, gtk::Widget); 4] = [
+    let pages: [(&str, &str, &str, gtk::Widget); 5] = [
         (
             "library",
             "Library",
@@ -24,6 +24,12 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
             "Runs",
             "view-list-ordered-symbolic",
             crate::runs_page::page(&shared),
+        ),
+        (
+            "output",
+            "Output",
+            "document-export-symbolic",
+            crate::output_page::page(&shared),
         ),
         ("import", "Import", "document-save-symbolic", import),
     ];
@@ -75,10 +81,14 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     });
     // A clip picked to be timed opens the Time page.
     let list2 = list.clone();
-    shared.subscribe(move |change| {
-        if change == crate::shared::Change::TimeClip {
+    shared.subscribe(move |change| match change {
+        crate::shared::Change::TimeClip => {
             select(&list2, "time");
         }
+        crate::shared::Change::Render => {
+            select(&list2, "output");
+        }
+        _ => {}
     });
     // GHOST_RUN_PAGE=runs (etc.) opens on that page: for screenshots and testing.
     let start = std::env::var("GHOST_RUN_PAGE").unwrap_or_default();

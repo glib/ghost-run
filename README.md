@@ -30,6 +30,13 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   another course, ignore them or delete them; add or rename courses. Each change
   is saved at once, with a backup in `timer_db.yaml.backups/`, and never over
   changes the Resolve script made meanwhile.
+- **Output**: tick runs on the Runs page and press **Render overlays** (or
+  **Add runs without overlays** here) to render each run's timer overlay: a
+  transparent ProRes 4444 `.mov` with the clip's timecode, in an `Overlays`
+  folder beside the clip (or the folder set in Settings). It compares each
+  sector with the best lap so far, or the optimal lap so far. Renders run one at
+  a time on all the cores the machine's memory allows; Stop leaves no half-written
+  file.
 - **Import**: verified card archive + editing copies (formerly
   [resolve-ingest](docs/ingest/import.md)).
 

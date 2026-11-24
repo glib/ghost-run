@@ -13,6 +13,7 @@
 //! stores and Resolve expects.
 
 pub mod encode;
+pub mod job;
 
 use std::collections::HashMap;
 

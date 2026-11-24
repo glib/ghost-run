@@ -17,9 +17,10 @@ use crate::{Cancel, cancelled};
 const VIDEO: &[&str] = &["mp4", "mov", "m4v", "mxf", "mkv", "avi", "mts", "m2ts"];
 
 /// Folders that hold copies, caches or backups rather than footage. Resolve
-/// writes the last four; `Proxy` is where proxies go.
+/// writes the last four; `Proxy` is where proxies go, `Overlays` overlays.
 const SKIP_DIRS: &[&str] = &[
     proxy::FOLDER,
+    crate::overlays::FOLDER,
     "CacheClip",
     "ProxyMedia",
     ".gallery",
@@ -68,6 +69,7 @@ pub fn find(folders: &[PathBuf], cancel: &Cancel) -> Vec<PathBuf> {
             if !entry.file_type().is_file()
                 || path.to_str().is_none()
                 || proxy::is_proxy_or_partial(path)
+                || crate::overlays::is_overlay(path)
             {
                 continue;
             }
@@ -219,6 +221,8 @@ mod tests {
             "a/Proxy/DJI_1.mov",
             "a/.DJI_3.partial.mov",
             "a/CacheClip/x.mov",
+            "a/Overlays/DJI_1.overlay.mov",
+            "a/elsewhere/DJI_9.overlay.mov",
             "a/.hidden/y.mp4",
             "a/notes.txt",
             "b/GX010150.mp4",

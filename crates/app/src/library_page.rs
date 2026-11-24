@@ -212,7 +212,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
     shared.subscribe(move |change| {
-        if change == Change::TimeClip {
+        if matches!(change, Change::TimeClip | Change::Render) {
             return;
         }
         load_runs(&p);

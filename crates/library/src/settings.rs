@@ -16,6 +16,21 @@ pub struct AppSettings {
     /// A Resolve project (`.drp`) new projects start from. Unused until the
     /// Resolve bridge exists.
     pub resolve_template: Option<PathBuf>,
+    /// Where overlays are rendered; `None`: an `Overlays` folder beside each clip.
+    pub overlay_folder: Option<PathBuf>,
+    /// What overlays compare each sector with.
+    pub comparison: Comparison,
+}
+
+/// What an overlay compares the run with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparison {
+    /// The course's best lap before this run.
+    #[default]
+    BestLap,
+    /// The fastest of each sector before this run, added up.
+    Optimal,
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
@@ -88,6 +103,8 @@ mod tests {
             footage_folders: vec!["/media/a".into(), "/media/b c".into()],
             run_database: Some("/home/x/timer_db.yaml".into()),
             resolve_template: None,
+            overlay_folder: Some("/out".into()),
+            comparison: Comparison::Optimal,
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);
