@@ -5,8 +5,11 @@
 //! Behaviour follows the Python implementation in `src/resolve_timer/` exactly;
 //! `scripts/parity.sh` checks the two CLIs give the same output.
 
+pub mod board;
 pub mod capture_time;
 pub mod database;
+pub mod edit;
+pub mod file;
 pub mod markers;
 pub mod matching;
 pub mod models;

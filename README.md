@@ -9,9 +9,15 @@ Start/S1…/Finish markers (automatically, from a reference run), compare runs p
 track, render overlays and hand them to DaVinci Resolve. Today the app has:
 
 - **Library**: every clip in your footage folders (Folders… to add them), when
-  it was recorded, and which stored run it is. **Make missing proxies** writes a
+  it was recorded, and which stored run it is (settings are under the gear in
+  the sidebar). **Make missing proxies** writes a
   half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
   Resolve picks up as proxy media and the coming frame viewer scrubs.
+- **Runs**: a leaderboard per course from your run database (best lap, optimal
+  lap, sector times with the fastest highlighted). Tick runs to move them to
+  another course, ignore them or delete them; add or rename courses. Each change
+  is saved at once, with a backup in `timer_db.yaml.backups/`, and never over
+  changes the Resolve script made meanwhile.
 - **Import**: verified card archive + editing copies (formerly
   [resolve-ingest](docs/ingest/import.md)).
 

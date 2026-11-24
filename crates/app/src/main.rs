@@ -1,6 +1,9 @@
 //! Ghost Run: the desktop app (no arguments) and the headless import commands.
 
 mod library_page;
+mod runs_page;
+mod settings_dialog;
+mod shared;
 mod shell;
 mod ui;
 
