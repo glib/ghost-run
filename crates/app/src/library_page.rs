@@ -5,7 +5,7 @@
 //! [`Command`]s and polls its [`Reply`]s, like the Import page does.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -30,8 +30,10 @@ enum Command {
 enum Reply {
     Clips(Vec<Clip>),
     Status(String, Option<f64>),
-    /// Which clip's proxy is being made now (`None`: the queue is done).
-    Making(Option<PathBuf>),
+    /// A clip's proxy is being made now.
+    Making(PathBuf),
+    /// A clip's proxy is finished (made or not).
+    Made(PathBuf),
     Done(String),
     Error(String),
 }
@@ -46,7 +48,7 @@ struct State {
     /// Clips with markers placed but not committed.
     drafted: HashSet<PathBuf>,
     selected: HashSet<PathBuf>,
-    making: Option<PathBuf>,
+    making: HashSet<PathBuf>,
     queued: HashSet<PathBuf>,
     busy: bool,
     only_missing: bool,
@@ -153,7 +155,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             runs_error: None,
             drafted: HashSet::new(),
             selected: HashSet::new(),
-            making: None,
+            making: HashSet::new(),
             queued: HashSet::new(),
             busy: false,
             only_missing: false,
@@ -249,6 +251,88 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     root.upcast()
 }
 
+/// Makes the queued proxies, several at once ([`proxy::plan`]), recording
+/// each in the library as it finishes. Returns how many were made and failed.
+fn make_proxies(
+    library: &Library,
+    queue: Vec<(PathBuf, MediaInfo)>,
+    cancel: &Cancel,
+    replies: &mpsc::Sender<Reply>,
+    send_clips: &dyn Fn(&Library),
+) -> (usize, usize) {
+    use std::sync::Mutex;
+    let total = queue.len();
+    let (w, h) = queue
+        .iter()
+        .map(|(_, i)| (i.width, i.height))
+        .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
+        .unwrap_or((3840, 2160));
+    let plan = proxy::plan(w, h, total);
+    let queue = Mutex::new(queue.into_iter().enumerate().collect::<VecDeque<_>>());
+    // Each clip's progress, 0–1, for the overall bar.
+    let progress = Mutex::new(vec![0.0f64; total]);
+    let finished = Mutex::new(0usize);
+    let (results, done) = mpsc::channel::<(PathBuf, ProxyState)>();
+    let report = |finished: usize| {
+        let fraction = progress.lock().unwrap().iter().sum::<f64>() / total.max(1) as f64;
+        let at_once = if plan.jobs > 1 {
+            format!(", {} at a time", plan.jobs)
+        } else {
+            String::new()
+        };
+        let _ = replies.send(Reply::Status(
+            format!("Making proxies: {finished} of {total} done{at_once}"),
+            Some(fraction),
+        ));
+    };
+    let (mut made, mut failed) = (0, 0);
+    std::thread::scope(|scope| {
+        for _ in 0..plan.jobs {
+            let results = results.clone();
+            let (queue, progress, finished, report) = (&queue, &progress, &finished, &report);
+            scope.spawn(move || {
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some((i, (path, info))) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let _ = replies.send(Reply::Making(path.clone()));
+                    let result = proxy::make_with(&path, &info, plan.threads, cancel, |f| {
+                        progress.lock().unwrap()[i] = f;
+                        report(*finished.lock().unwrap());
+                    });
+                    let state = match result {
+                        Ok(p) => ProxyState::Ready(p),
+                        Err(_) if cancel.load(Ordering::Relaxed) => {
+                            let _ = replies.send(Reply::Made(path));
+                            break;
+                        }
+                        Err(e) => ProxyState::Failed(format!("{e:#}")),
+                    };
+                    progress.lock().unwrap()[i] = 1.0;
+                    *finished.lock().unwrap() += 1;
+                    report(*finished.lock().unwrap());
+                    let _ = results.send((path, state));
+                }
+            });
+        }
+        drop(results);
+        // The library is this thread's: record results here as they come.
+        for (path, state) in done {
+            match state {
+                ProxyState::Ready(_) => made += 1,
+                _ => failed += 1,
+            }
+            let _ = library.set_proxy(&path, state);
+            let _ = replies.send(Reply::Made(path));
+            send_clips(library);
+        }
+    });
+    (made, failed)
+}
+
 fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cancel: Cancel) {
     std::thread::spawn(move || {
         let library = match Library::open_default() {
@@ -292,39 +376,8 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                         let _ = replies.send(Reply::Error(format!("{e:#}")));
                         continue;
                     }
-                    let (mut made, mut failed) = (0, 0);
-                    let total = queue.len();
-                    for (i, (path, info)) in queue.into_iter().enumerate() {
-                        if cancel.load(Ordering::Relaxed) {
-                            break;
-                        }
-                        let _ = replies.send(Reply::Making(Some(path.clone())));
-                        let name = path
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        let result = proxy::make(&path, &info, &cancel, |f| {
-                            let _ = replies.send(Reply::Status(
-                                format!("Making proxy {} of {total}: {name}", i + 1),
-                                Some(f),
-                            ));
-                        });
-                        let state = match result {
-                            Ok(p) => {
-                                made += 1;
-                                ProxyState::Ready(p)
-                            }
-                            Err(_) if cancel.load(Ordering::Relaxed) => break,
-                            Err(e) => {
-                                failed += 1;
-                                ProxyState::Failed(format!("{e:#}"))
-                            }
-                        };
-                        let _ = library.set_proxy(&path, state);
-                        send_clips(&library);
-                    }
-                    let _ = replies.send(Reply::Making(None));
+                    let (made, failed) =
+                        make_proxies(&library, queue, &cancel, &replies, &send_clips);
                     let mut text = format!("Made {made} {}.", plural(made, "proxy", "proxies"));
                     if failed > 0 {
                         text.push_str(&format!(" {failed} failed: see the Proxy column."));
@@ -527,17 +580,21 @@ fn handle(p: &Page, reply: Reply) {
         }
         Reply::Making(path) => {
             let mut s = p.state.borrow_mut();
-            if let Some(path) = &path {
-                s.queued.remove(path);
-            } else {
-                s.queued.clear();
-            }
-            s.making = path;
+            s.queued.remove(&path);
+            s.making.insert(path);
             drop(s);
             refill(p);
         }
+        Reply::Made(path) => {
+            p.state.borrow_mut().making.remove(&path);
+            refill(p);
+        }
         Reply::Done(text) | Reply::Error(text) => {
-            p.state.borrow_mut().busy = false;
+            let mut s = p.state.borrow_mut();
+            s.busy = false;
+            s.making.clear();
+            s.queued.clear();
+            drop(s);
             p.status.set_text(&text);
             p.progress.set_visible(false);
             // Auto-placing makes drafts; show them.
@@ -827,7 +884,7 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
             None => ("Can't read".into(), clip.probe_error.clone()),
         },
         4 => {
-            if s.making.as_ref() == Some(&clip.path) {
+            if s.making.contains(&clip.path) {
                 return ("Making…".into(), None);
             }
             if s.queued.contains(&clip.path) {
