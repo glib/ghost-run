@@ -20,6 +20,11 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   course's best as you go. **Commit run** saves it to the run database the same
   way the Resolve script does (same run ids and fields). Markers not yet
   committed are kept as a draft, so closing the app loses nothing.
+  **Auto-place** puts the markers in for you by matching the clip's footage with
+  the course's reference run (the best lap with footage, or one you pick with
+  **Use this run as the reference**); **Find the course** tries every course.
+  Markers it is less sure of are highlighted to check by eye. In the Library,
+  **Auto-place ticked** does this for many clips at once, as drafts to check.
 - **Runs**: a leaderboard per course from your run database (best lap, optimal
   lap, sector times with the fastest highlighted). Tick runs to move them to
   another course, ignore them or delete them; add or rename courses. Each change

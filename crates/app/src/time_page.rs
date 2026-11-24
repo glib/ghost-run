@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use library::auto::{self, Placement, Reference};
 use library::frames::{Frame, read_frame};
 use library::{Clip, Draft, Library, MediaInfo, ProxyState};
 use timer_core::TimerDatabase;
@@ -42,6 +43,14 @@ struct Request {
 /// A decoded frame (or why it couldn't be), and which file it is from.
 type Decoded = (PathBuf, i64, Result<Frame, String>);
 
+/// What an auto-markers job found, for the clip at the path.
+enum Auto {
+    /// Placed from the chosen course's reference.
+    Placed(PathBuf, Result<Placement, String>),
+    /// Placed against every course's reference, best first.
+    Matched(PathBuf, Result<Vec<Placement>, String>),
+}
+
 /// The clip being timed.
 struct Open {
     clip: Clip,
@@ -66,6 +75,10 @@ struct State {
     run_id: Option<String>,
     /// The markers differ from the stored run (or there is none yet).
     unsaved: bool,
+    /// The chosen course's reference for auto-markers.
+    reference: Option<Reference>,
+    /// An auto-markers job is running.
+    auto_busy: bool,
 }
 
 #[derive(Clone)]
@@ -94,10 +107,17 @@ struct Page {
     commit: gtk::Button,
     discard: gtk::Button,
     status: gtk::Label,
+    reference: gtk::Label,
+    auto_place: gtk::Button,
+    find_course: gtk::Button,
+    use_reference: gtk::Button,
+    spinner: gtk::Spinner,
+    auto: mpsc::Sender<Auto>,
 }
 
 pub fn page(shared: &Shared) -> gtk::Widget {
     let (requests, decoded) = decoder();
+    let (auto, auto_done) = mpsc::channel::<Auto>();
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
@@ -204,6 +224,29 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let courses = gtk::DropDown::from_strings(&[]);
     courses.update_property(&[gtk::accessible::Property::Label("Course")]);
     side.append(&courses);
+    let auto_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let auto_place = button("Auto-place");
+    auto_place.set_tooltip_text(Some(
+        "Place the markers by matching this clip's footage with the course's reference run",
+    ));
+    let find_course = button("Find the course");
+    find_course.set_tooltip_text(Some(
+        "Match this clip against every course's reference run and use the best",
+    ));
+    let spinner = gtk::Spinner::new();
+    auto_row.append(&auto_place);
+    auto_row.append(&find_course);
+    auto_row.append(&spinner);
+    side.append(&auto_row);
+    let reference = label("", "dim-label");
+    reference.set_wrap(true);
+    side.append(&reference);
+    let use_reference = button("Use this run as the reference");
+    use_reference.set_tooltip_text(Some(
+        "Place other clips' markers on this course from this run",
+    ));
+    use_reference.set_halign(gtk::Align::Start);
+    side.append(&use_reference);
     side.append(&label("Markers", "heading"));
     let markers = gtk::ListBox::new();
     markers.add_css_class("boxed-list");
@@ -258,6 +301,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             source: "hand".into(),
             run_id: None,
             unsaved: false,
+            reference: None,
+            auto_busy: false,
         })),
         requests,
         title,
@@ -279,6 +324,12 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         commit: commit.clone(),
         discard: discard.clone(),
         status,
+        reference,
+        auto_place: auto_place.clone(),
+        find_course: find_course.clone(),
+        use_reference: use_reference.clone(),
+        spinner,
+        auto,
     };
 
     for (b, step) in step_buttons {
@@ -315,6 +366,12 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     commit.connect_clicked(move |_| commit_run(&p));
     let p = page.clone();
     discard.connect_clicked(move |_| discard_changes(&p));
+    let p = page.clone();
+    auto_place.connect_clicked(move |_| start_auto(&p, false));
+    let p = page.clone();
+    find_course.connect_clicked(move |_| start_auto(&p, true));
+    let p = page.clone();
+    use_reference.connect_clicked(move |_| use_as_reference(&p));
     keyboard(&page);
 
     let p = page.clone();
@@ -335,6 +392,9 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         let newest = decoded.try_iter().last();
         if let Some((path, index, frame)) = newest {
             shown(&p, &path, index, frame);
+        }
+        for result in auto_done.try_iter() {
+            auto_finished(&p, result);
         }
         glib::ControlFlow::Continue
     });
@@ -524,6 +584,7 @@ fn open_clip(p: &Page, clip: Clip) {
     });
     s.position = -1;
     drop(s);
+    find_reference(p);
 
     p.following.set(true);
     p.scale.set_range(0.0, (frames - 1).max(1) as f64);
@@ -610,6 +671,26 @@ fn load_database(p: &Page) {
                 .map(|r| r.id.clone());
         s.run_id = run_id;
     }
+    drop(s);
+    find_reference(p);
+}
+
+/// Looks up the chosen course's reference run.
+fn find_reference(p: &Page) {
+    let mut s = p.state.borrow_mut();
+    let found = match (course(&s), &s.db) {
+        (Some(course), Some(db)) => Library::open_default()
+            .and_then(|l| {
+                let clips = l.clips()?;
+                auto::reference(db, course, &l, &clips)
+            })
+            .unwrap_or_else(|e| {
+                eprintln!("ghost-run: no reference: {e:#}");
+                None
+            }),
+        _ => None,
+    };
+    s.reference = found;
 }
 
 fn course(s: &State) -> Option<&Course> {
@@ -770,7 +851,40 @@ fn show(p: &Page) {
     }));
     p.commit
         .set_sensitive(complete && s.unsaved && s.db.is_some());
-    p.discard.set_sensitive(s.unsaved);
+    p.discard.set_sensitive(s.unsaved && !s.auto_busy);
+    p.reference.set_text(&match &s.reference {
+        Some(r) => format!(
+            "Reference: {} ({}, {})",
+            r.run_id,
+            clock(r.lap_seconds),
+            if r.chosen {
+                "chosen"
+            } else {
+                "best lap with footage"
+            }
+        ),
+        None if s.db.is_some() => {
+            "No run on this course to place markers from yet: time one by hand first.".to_owned()
+        }
+        None => String::new(),
+    });
+    p.auto_place
+        .set_sensitive(s.reference.is_some() && !s.auto_busy);
+    p.find_course
+        .set_sensitive(s.db.as_ref().is_some_and(|db| !db.courses.is_empty()) && !s.auto_busy);
+    p.spinner.set_spinning(s.auto_busy);
+    let own_run_on_course = s.run_id.as_ref().is_some_and(|id| {
+        s.db.as_ref().is_some_and(|db| {
+            db.runs
+                .iter()
+                .any(|r| &r.id == id && Some(&r.course_id) == s.course.as_ref())
+        })
+    });
+    p.use_reference.set_visible(
+        own_run_on_course
+            && !s.unsaved
+            && s.reference.as_ref().map(|r| &r.run_id) != s.run_id.as_ref(),
+    );
     p.discard.set_label(if s.run_id.is_some() {
         "Discard changes"
     } else {
@@ -788,6 +902,10 @@ fn marker_row(p: &Page, s: &State, name: &str, fps: f64) -> adw::ActionRow {
     };
     if let Some(c) = s.confidence.get(name) {
         subtitle.push_str(&format!(" · auto, {:.0}% sure", c * 100.0));
+        if *c < auto::CHECK_BELOW {
+            subtitle.push_str(": check it");
+            row.add_css_class("check-marker");
+        }
     }
     row.set_subtitle(&subtitle);
     if frame == Some(s.position) {
@@ -944,6 +1062,7 @@ fn change_course(p: &Page, id: String) {
         s.unsaved = true;
     }
     drop(s);
+    find_reference(p);
     save_draft(p);
     show(p);
 }
@@ -1063,6 +1182,165 @@ fn commit_run(p: &Page) {
     ));
     show(p);
     p.shared.notify(Change::Runs);
+}
+
+/// Starts placing markers on a background thread: from the chosen course's
+/// reference, or (`every_course`) against every course's.
+fn start_auto(p: &Page, every_course: bool) {
+    let mut s = p.state.borrow_mut();
+    let Some(open) = &s.open else { return };
+    let clip = open.clip.path.clone();
+    let footage = open.view.clone();
+    let references = if every_course {
+        let Some(db) = &s.db else { return };
+        match Library::open_default().and_then(|l| {
+            let clips = l.clips()?;
+            auto::references(db, &l, &clips)
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                p.status.set_text(&format!("{e:#}"));
+                return;
+            }
+        }
+    } else {
+        s.reference.clone().into_iter().collect()
+    };
+    s.auto_busy = true;
+    drop(s);
+    p.status.set_text(if every_course {
+        "Matching the clip against each course's reference run…"
+    } else {
+        "Placing markers from the reference run…"
+    });
+    show(p);
+    let tx = p.auto.clone();
+    std::thread::spawn(move || {
+        let cache = auto::cache_dir();
+        let result = if every_course {
+            Auto::Matched(
+                clip,
+                auto::match_courses(&references, &footage, cache.as_deref())
+                    .map_err(|e| format!("{e:#}")),
+            )
+        } else {
+            Auto::Placed(
+                clip,
+                auto::place(&references[0], &footage, cache.as_deref())
+                    .map_err(|e| format!("{e:#}")),
+            )
+        };
+        let _ = tx.send(result);
+    });
+}
+
+fn auto_finished(p: &Page, result: Auto) {
+    p.state.borrow_mut().auto_busy = false;
+    let (clip, placement, note) = match result {
+        Auto::Placed(clip, Ok(placement)) => (clip, placement, String::new()),
+        Auto::Matched(clip, Ok(ranked)) => {
+            let names = course_names(p);
+            let best = ranked[0].clone();
+            let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+            let next = ranked
+                .get(1)
+                .map(|n| {
+                    format!(
+                        " (next closest: {}, {:.2})",
+                        name(&n.course_id),
+                        n.match_cost
+                    )
+                })
+                .unwrap_or_default();
+            if best.match_cost >= auto::POOR_MATCH {
+                p.status.set_text(&format!(
+                    "No course matched well (closest: {}, {:.2}){next}. Is the run in this clip? Pick the course and place the markers by hand.",
+                    name(&best.course_id),
+                    best.match_cost
+                ));
+                show(p);
+                return;
+            }
+            let note = format!("Looks like {}{next}. ", name(&best.course_id));
+            (clip, best, note)
+        }
+        Auto::Placed(_, Err(e)) | Auto::Matched(_, Err(e)) => {
+            p.status.set_text(&format!("Markers not placed: {e}"));
+            show(p);
+            return;
+        }
+    };
+    let mut s = p.state.borrow_mut();
+    if s.open.as_ref().map(|o| &o.clip.path) != Some(&clip) {
+        // Another clip was opened meanwhile.
+        drop(s);
+        show(p);
+        return;
+    }
+    let course_changed = s.course.as_ref() != Some(&placement.course_id);
+    s.course = Some(placement.course_id.clone());
+    s.markers = placement.markers.clone();
+    s.confidence = placement.confidence.clone();
+    s.source = "auto".into();
+    s.unsaved = true;
+    let start = s.markers.get("Start").copied();
+    drop(s);
+    if course_changed {
+        find_reference(p);
+    }
+    save_draft(p);
+    show(p);
+    if let Some(start) = start {
+        seek(p, start);
+    }
+    let check = placement.to_check();
+    let advice = if check.is_empty() {
+        "Step through each marker to be sure, then commit.".to_owned()
+    } else {
+        format!("Check {} by eye, then commit.", check.join(", "))
+    };
+    let quality = if placement.quality() == "poor" {
+        "poor: is the run in this clip?"
+    } else {
+        placement.quality()
+    };
+    p.status.set_text(&format!(
+        "{note}Placed from {}: match {quality} ({:.2}). {advice}",
+        placement.reference_run, placement.match_cost
+    ));
+}
+
+/// Course id → name.
+fn course_names(p: &Page) -> std::collections::HashMap<String, String> {
+    p.state
+        .borrow()
+        .db
+        .as_ref()
+        .map(|db| {
+            db.courses
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn use_as_reference(p: &Page) {
+    let s = p.state.borrow();
+    let (Some(course), Some(run)) = (s.course.clone(), s.run_id.clone()) else {
+        return;
+    };
+    drop(s);
+    match Library::open_default().and_then(|l| l.set_reference(&course, &run)) {
+        Ok(()) => {
+            find_reference(p);
+            p.status.set_text(&format!(
+                "{run} is now this course's reference: other clips' markers are placed from it."
+            ));
+        }
+        Err(e) => p.status.set_text(&format!("Not changed: {e:#}")),
+    }
+    show(p);
 }
 
 /// Arrow keys and friends step through the clip while this page is showing.

@@ -34,3 +34,4 @@ button.table-action { min-height: 24px; padding: 2px 8px; }
 
 .frame-view { background: #000; border-radius: 6px; }
 .current-marker { background: alpha(@accent_bg_color, 0.25); }
+.check-marker { background: alpha(@warning_bg_color, 0.25); }
