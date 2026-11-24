@@ -44,14 +44,24 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # The app (crates/app) builds against GTK4 and libadwaita. The .debs are
-      # cached, so apt's slow downloads and triggers run only when this changes.
+      # The app (crates/app) builds against GTK4 and libadwaita. Usually ~30 s,
+      # but apt downloads on hosted runners sometimes stall for good, so each
+      # attempt is time-limited and retried (no man-db rebuild, short network
+      # timeouts).
       - name: Install GTK
-        timeout-minutes: 8
-        uses: awalsh128/cache-apt-pkgs-action@v1.6.3
-        with:
-          packages: libgtk-4-dev libadwaita-1-dev
-          version: gtk-v1
+        timeout-minutes: 10
+        run: |
+          sudo rm -f /var/lib/man-db/auto-update
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          for attempt in 1 2 3; do
+            if timeout 150 sudo apt-get "${apt_opts[@]}" update -q &&
+               timeout 150 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_opts[@]}" install -y -q --no-install-recommends libgtk-4-dev libadwaita-1-dev; then
+              exit 0
+            fi
+            echo "::warning::GTK install attempt $attempt failed or stalled; retrying"
+            sleep 5
+          done
+          exit 1
       # The render and auto-markers tests need ffmpeg (with prores_aw and
       # libx264) and must not skip here. A static build from GitHub releases,
       # cached, instead of apt: apt took 8+ minutes and once hung.
