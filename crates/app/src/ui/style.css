@@ -31,3 +31,6 @@ button.ingest-action:not(.suggested-action) { border: 1px solid #788494; }
 .footage-table cell { padding: 2px 6px; }
 button.table-action { min-height: 24px; padding: 2px 8px; }
 .fastest { color: #c3a6ff; font-weight: bold; }
+
+.frame-view { background: #000; border-radius: 6px; }
+.current-marker { background: alpha(@accent_bg_color, 0.25); }

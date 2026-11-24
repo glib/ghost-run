@@ -12,6 +12,8 @@ pub enum Change {
     Settings,
     /// A page wrote the run database.
     Runs,
+    /// A clip was picked to be timed ([`Shared::time_clip`]).
+    TimeClip,
 }
 
 type Listener = Rc<dyn Fn(Change)>;
@@ -24,6 +26,8 @@ pub struct Shared {
     listeners: Rc<RefCell<Vec<Option<Listener>>>>,
     /// Why the settings couldn't be read at start, if they couldn't.
     pub load_error: Option<String>,
+    /// The clip picked to be timed, for the Time page to take.
+    to_time: Rc<RefCell<Option<std::path::PathBuf>>>,
 }
 
 impl Shared {
@@ -40,6 +44,7 @@ impl Shared {
             settings: Rc::new(RefCell::new(settings)),
             listeners: Rc::default(),
             load_error,
+            to_time: Rc::default(),
         }
     }
 
@@ -66,6 +71,17 @@ impl Shared {
         if let Some(slot) = self.listeners.borrow_mut().get_mut(id) {
             *slot = None;
         }
+    }
+
+    /// Opens `clip` on the Time page.
+    pub fn time_clip(&self, clip: std::path::PathBuf) {
+        *self.to_time.borrow_mut() = Some(clip);
+        self.notify(Change::TimeClip);
+    }
+
+    /// The clip picked to be timed, once.
+    pub fn take_clip_to_time(&self) -> Option<std::path::PathBuf> {
+        self.to_time.borrow_mut().take()
     }
 
     pub fn notify(&self, change: Change) {

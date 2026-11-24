@@ -9,6 +9,7 @@
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
 
+pub mod frames;
 pub mod probe;
 pub mod proxy;
 pub mod scan;
@@ -16,7 +17,7 @@ pub mod settings;
 pub mod store;
 
 pub use probe::MediaInfo;
-pub use store::{Clip, Library, ProxyState};
+pub use store::{Clip, Draft, Library, ProxyState};
 
 /// Set to stop a scan or a proxy encode at the next check.
 pub type Cancel = std::sync::Arc<std::sync::atomic::AtomicBool>;

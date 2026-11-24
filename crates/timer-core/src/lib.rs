@@ -7,6 +7,7 @@
 
 pub mod board;
 pub mod capture_time;
+pub mod commit;
 pub mod database;
 pub mod edit;
 pub mod file;
@@ -14,6 +15,7 @@ pub mod markers;
 pub mod matching;
 pub mod models;
 pub mod overlay;
+pub mod preview;
 pub mod py;
 pub mod stats;
 pub mod timing;

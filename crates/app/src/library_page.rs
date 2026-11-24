@@ -40,6 +40,8 @@ struct State {
     /// Lower-case clip file name → "course · run id".
     runs: HashMap<String, String>,
     runs_error: Option<String>,
+    /// Clips with markers placed but not committed.
+    drafted: HashSet<PathBuf>,
     selected: HashSet<PathBuf>,
     making: Option<PathBuf>,
     queued: HashSet<PathBuf>,
@@ -62,6 +64,7 @@ struct Page {
     progress: gtk::ProgressBar,
     rescan: gtk::Button,
     proxies: gtk::Button,
+    time: gtk::Button,
     stop: gtk::Button,
 }
 
@@ -104,9 +107,14 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let rescan = button("Rescan");
     let proxies = button("Make proxies");
     proxies.add_css_class("suggested-action");
+    let time = button("Time it");
+    time.set_tooltip_text(Some(
+        "Place the markers on the ticked clip (or double-click a clip)",
+    ));
     toolbar.append(&counts);
     toolbar.append(&filter);
     toolbar.append(&rescan);
+    toolbar.append(&time);
     toolbar.append(&proxies);
     content.append(&toolbar);
 
@@ -134,6 +142,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             clips: Vec::new(),
             runs: HashMap::new(),
             runs_error: None,
+            drafted: HashSet::new(),
             selected: HashSet::new(),
             making: None,
             queued: HashSet::new(),
@@ -150,6 +159,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         progress,
         rescan: rescan.clone(),
         proxies: proxies.clone(),
+        time: time.clone(),
         stop: stop.clone(),
     };
 
@@ -168,6 +178,13 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     proxies.connect_clicked(move |_| confirm_proxies(&p));
     let p = page.clone();
+    time.connect_clicked(move |_| {
+        let one = p.state.borrow().selected.iter().next().cloned();
+        if let Some(path) = one {
+            p.shared.time_clip(path);
+        }
+    });
+    let p = page.clone();
     stop.connect_clicked(move |_| {
         p.cancel.store(true, Ordering::Relaxed);
         p.status.set_text("Stopping…");
@@ -183,6 +200,9 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
     shared.subscribe(move |change| {
+        if change == Change::TimeClip {
+            return;
+        }
         load_runs(&p);
         refill(&p);
         let folders = p.shared.settings().footage_folders.clone();
@@ -447,6 +467,7 @@ fn refresh_controls(p: &Page) {
     });
     p.rescan.set_sensitive(!s.busy && !no_folders);
     p.proxies.set_sensitive(!s.busy && !s.clips.is_empty());
+    p.time.set_sensitive(s.selected.len() == 1);
     p.proxies.set_label(if s.selected.is_empty() {
         "Make missing proxies"
     } else {
@@ -495,6 +516,17 @@ fn table(p: &Page) -> gtk::ColumnView {
     let selection = gtk::NoSelection::new(Some(p.store.clone()));
     let view = gtk::ColumnView::new(Some(selection));
     view.add_css_class("footage-table");
+    let page = p.clone();
+    view.connect_activate(move |_, position| {
+        let clip = page
+            .store
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .map(|o| o.borrow::<Clip>().path.clone());
+        if let Some(path) = clip {
+            page.shared.time_clip(path);
+        }
+    });
     view.set_show_row_separators(true);
     for (index, (title, width)) in COLUMNS.iter().enumerate() {
         let factory = gtk::SignalListItemFactory::new();
@@ -640,7 +672,15 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
             }
         }
         5 => match s.runs.get(&run_key(&clip.path)) {
+            Some(run) if s.drafted.contains(&clip.path) => (
+                format!("{run} (changed)"),
+                Some("Markers changed on the Time page, not committed yet".into()),
+            ),
             Some(run) => (run.clone(), None),
+            None if s.drafted.contains(&clip.path) => (
+                "Draft".into(),
+                Some("Markers placed on the Time page, not committed yet".into()),
+            ),
             None => (String::new(), None),
         },
         _ => {
@@ -672,6 +712,9 @@ fn load_runs(p: &Page) {
     let mut s = p.state.borrow_mut();
     s.runs.clear();
     s.runs_error = None;
+    s.drafted = Library::open_default()
+        .and_then(|l| l.drafted())
+        .unwrap_or_default();
     let Some(path) = path else { return };
     match timer_core::TimerDatabase::load(&path) {
         Ok(db) => {
