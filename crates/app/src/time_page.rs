@@ -7,9 +7,13 @@
 //! always works on the newest frame asked for and skips the rest, so
 //! scrubbing never queues up. Markers are kept in the library as a draft
 //! until committed, so closing the app loses nothing.
+//!
+//! With no clip open (or after "Clips"), the page lists the Library's clips
+//! to pick from: by default the ones with a proxy that aren't timed yet,
+//! newest first. A file outside the Library can still be opened.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -113,6 +117,22 @@ struct Page {
     use_reference: gtk::Button,
     spinner: gtk::Spinner,
     auto: mpsc::Sender<Auto>,
+    picker: Picker,
+    /// "Clips" over the editor, "Back to clip" over the list.
+    switch: gtk::Button,
+}
+
+/// The list of Library clips to pick from.
+#[derive(Clone)]
+struct Picker {
+    list: gtk::ListBox,
+    /// The list, or a note saying why it's empty.
+    views: gtk::Stack,
+    empty: adw::StatusPage,
+    untimed_only: gtk::DropDown,
+    proxy_only: gtk::CheckButton,
+    /// The clip on each row, in order.
+    paths: Rc<RefCell<Vec<PathBuf>>>,
 }
 
 pub fn page(shared: &Shared) -> gtk::Widget {
@@ -123,8 +143,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let header = adw::HeaderBar::new();
     let title = adw::WindowTitle::new("Time a run", "");
     header.set_title_widget(Some(&title));
-    let open = button("Open clip…");
-    open.set_tooltip_text(Some("Time a clip that isn't in the Library"));
+    let open = button("Clips");
+    open.set_tooltip_text(Some("Pick another clip from the Library"));
     header.pack_end(&open);
     let keys = gtk::MenuButton::new();
     keys.set_icon_name("input-keyboard-symbolic");
@@ -135,17 +155,52 @@ pub fn page(shared: &Shared) -> gtk::Widget {
 
     let views = gtk::Stack::new();
     views.set_vexpand(true);
-    let empty = adw::StatusPage::new();
-    empty.set_icon_name(Some("alarm-symbolic"));
-    empty.set_title("Pick a clip to time");
-    empty.set_description(Some(
-        "Double-click a clip in the Library (or tick one and press Time it), or open a clip from anywhere.",
+    let pick = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    pick.add_css_class("content");
+    let pick_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let pick_title = label("Pick a clip to time", "title-3");
+    pick_title.set_hexpand(true);
+    let untimed_only = gtk::DropDown::from_strings(&["Not timed yet", "All clips"]);
+    untimed_only.update_property(&[gtk::accessible::Property::Label("Which clips to list")]);
+    let proxy_only = gtk::CheckButton::with_label("Only with a proxy");
+    proxy_only.set_active(true);
+    proxy_only.set_tooltip_text(Some(
+        "Clips with a proxy step frame by frame quickly; make proxies on the Library page",
     ));
-    let open_empty = button("Open clip…");
-    open_empty.set_halign(gtk::Align::Center);
-    open_empty.add_css_class("pill");
-    empty.set_child(Some(&open_empty));
-    views.add_named(&empty, Some("empty"));
+    pick_bar.append(&pick_title);
+    pick_bar.append(&proxy_only);
+    pick_bar.append(&untimed_only);
+    pick.append(&pick_bar);
+    let pick_views = gtk::Stack::new();
+    pick_views.set_vexpand(true);
+    let pick_list = gtk::ListBox::new();
+    pick_list.add_css_class("boxed-list");
+    pick_list.set_selection_mode(gtk::SelectionMode::None);
+    pick_list.set_valign(gtk::Align::Start);
+    pick_list.update_property(&[gtk::accessible::Property::Label("Clips to time")]);
+    let pick_scroller = gtk::ScrolledWindow::builder()
+        .child(&pick_list)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
+    pick_views.add_named(&pick_scroller, Some("list"));
+    let pick_empty = adw::StatusPage::new();
+    pick_empty.set_icon_name(Some("alarm-symbolic"));
+    pick_views.add_named(&pick_empty, Some("empty"));
+    pick.append(&pick_views);
+    let open_file = gtk::Button::with_label("Open a file that isn't in the Library…");
+    open_file.add_css_class("flat");
+    open_file.set_halign(gtk::Align::Start);
+    pick.append(&open_file);
+    views.add_named(&pick, Some("empty"));
+    let picker = Picker {
+        list: pick_list.clone(),
+        views: pick_views,
+        empty: pick_empty,
+        untimed_only: untimed_only.clone(),
+        proxy_only: proxy_only.clone(),
+        paths: Rc::default(),
+    };
 
     let editor = gtk::Box::new(gtk::Orientation::Horizontal, 18);
     editor.add_css_class("content");
@@ -330,6 +385,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         use_reference: use_reference.clone(),
         spinner,
         auto,
+        picker,
+        switch: open.clone(),
     };
 
     for (b, step) in step_buttons {
@@ -344,10 +401,27 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     });
     let p = page.clone();
     set_next.connect_clicked(move |_| set_next_marker(&p));
-    for b in [&open, &open_empty] {
-        let p = page.clone();
-        b.connect_clicked(move |_| choose_clip(&p));
-    }
+    let p = page.clone();
+    open_file.connect_clicked(move |_| choose_clip(&p));
+    let p = page.clone();
+    open.connect_clicked(move |_| {
+        let picking = p.views.visible_child_name().as_deref() == Some("empty");
+        show_picker(&p, !picking);
+    });
+    let p = page.clone();
+    pick_list.connect_row_activated(move |_, row| {
+        let path = p.picker.paths.borrow().get(row.index() as usize).cloned();
+        if let Some(path) = path {
+            open_path(&p, &path);
+        }
+    });
+    let p = page.clone();
+    untimed_only.connect_selected_notify(move |_| fill_picker(&p));
+    let p = page.clone();
+    proxy_only.connect_toggled(move |_| fill_picker(&p));
+    // Proxies made or runs timed elsewhere since: list them as they are now.
+    let p = page.clone();
+    root.connect_map(move |_| fill_picker(&p));
     let p = page.clone();
     choose.connect_clicked(move |_| crate::settings_dialog::choose_database(&p.shared, false));
     let p = page.clone();
@@ -384,6 +458,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         Change::Settings | Change::Runs => {
             load_database(&p);
             show(&p);
+            fill_picker(&p);
         }
         Change::Render | Change::Resolve => {}
     });
@@ -402,7 +477,162 @@ pub fn page(shared: &Shared) -> gtk::Widget {
 
     load_database(&page);
     show(&page);
+    fill_picker(&page);
     root.upcast()
+}
+
+/// Shows the clip list (or, with `false`, the open clip) and labels the
+/// header button for going the other way.
+fn show_picker(p: &Page, picking: bool) {
+    let open = p.state.borrow().open.is_some();
+    let picking = picking || !open;
+    if picking {
+        fill_picker(p);
+    }
+    p.views
+        .set_visible_child_name(if picking { "empty" } else { "editor" });
+    p.switch.set_visible(open);
+    p.switch
+        .set_label(if picking { "Back to clip" } else { "Clips" });
+    p.switch.set_tooltip_text(Some(if picking {
+        "Carry on with the clip that's open"
+    } else {
+        "Pick another clip from the Library"
+    }));
+}
+
+/// A Library clip as the picker lists it.
+#[derive(Debug, Clone, PartialEq)]
+struct Pickable {
+    clip: Clip,
+    /// The run timed from it, and its course's name.
+    run: Option<(String, String)>,
+    /// It has markers placed but not committed.
+    drafted: bool,
+}
+
+/// The clips to list, newest first: only those not timed yet (drafts count
+/// as not timed) and only those with a proxy, if asked.
+fn pickable(
+    clips: &[Clip],
+    db: Option<&TimerDatabase>,
+    drafted: &HashSet<PathBuf>,
+    untimed_only: bool,
+    proxy_only: bool,
+) -> Vec<Pickable> {
+    let mut timed: HashMap<PathBuf, (String, String)> = HashMap::new();
+    if let Some(db) = db {
+        for run in &db.runs {
+            if let Some(clip) = auto::run_clip(run, clips) {
+                let course = db
+                    .course_by_id(&run.course_id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                timed.insert(clip.path, (run.id.clone(), course));
+            }
+        }
+    }
+    let mut list: Vec<Pickable> = clips
+        .iter()
+        .filter(|c| !proxy_only || matches!(c.proxy, ProxyState::Ready(_)))
+        .map(|c| Pickable {
+            clip: c.clone(),
+            run: timed.get(&c.path).cloned(),
+            drafted: drafted.contains(&c.path),
+        })
+        .filter(|c| !untimed_only || c.run.is_none())
+        .collect();
+    list.sort_by(|a, b| {
+        b.clip
+            .recorded
+            .cmp(&a.clip.recorded)
+            .then_with(|| a.clip.path.cmp(&b.clip.path))
+    });
+    list
+}
+
+/// A picker row's second line: when, how long, proxy, and whether it's timed.
+fn pick_subtitle(c: &Pickable) -> String {
+    let mut parts = Vec::new();
+    if let Some(when) = &c.clip.recorded {
+        parts.push(when.get(..16).unwrap_or(when).to_owned());
+    }
+    if let Some(secs) = c.clip.info.as_ref().and_then(|i| i.duration_seconds) {
+        let secs = secs.round() as i64;
+        parts.push(format!("{}:{:02}", secs / 60, secs % 60));
+    }
+    parts.push(match c.clip.proxy {
+        ProxyState::Ready(_) => "proxy ready".to_owned(),
+        _ => "no proxy (slower to step through)".to_owned(),
+    });
+    match (&c.run, c.drafted) {
+        (Some((id, course)), _) if course.is_empty() => parts.push(format!("timed: {id}")),
+        (Some((id, course)), _) => parts.push(format!("timed: {course}, {id}")),
+        (None, true) => parts.push("markers placed, not committed".to_owned()),
+        (None, false) => {}
+    }
+    parts.join(" · ")
+}
+
+/// Lists the Library's clips to pick from, as the filters say.
+fn fill_picker(p: &Page) {
+    let picker = &p.picker;
+    let library = Library::open_default();
+    let clips = library
+        .as_ref()
+        .ok()
+        .and_then(|l| l.clips().ok())
+        .unwrap_or_default();
+    let drafted = library
+        .as_ref()
+        .ok()
+        .and_then(|l| l.drafted().ok())
+        .unwrap_or_default();
+    let untimed_only = picker.untimed_only.selected() == 0;
+    let proxy_only = picker.proxy_only.is_active();
+    let list = {
+        let s = p.state.borrow();
+        pickable(&clips, s.db.as_ref(), &drafted, untimed_only, proxy_only)
+    };
+    while let Some(row) = picker.list.first_child() {
+        picker.list.remove(&row);
+    }
+    for c in &list {
+        let row = adw::ActionRow::new();
+        row.set_title(&glib::markup_escape_text(&c.clip.name()));
+        row.set_subtitle(&glib::markup_escape_text(&pick_subtitle(c)));
+        row.set_activatable(true);
+        row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        picker.list.append(&row);
+    }
+    *picker.paths.borrow_mut() = list.iter().map(|c| c.clip.path.clone()).collect();
+    if !list.is_empty() {
+        picker.views.set_visible_child_name("list");
+        return;
+    }
+    let with_proxy = clips
+        .iter()
+        .filter(|c| matches!(c.proxy, ProxyState::Ready(_)))
+        .count();
+    let (title, text) = if clips.is_empty() {
+        (
+            "No clips in the Library",
+            "Add your footage folders in Settings (the gear in the sidebar), or open a file below.",
+        )
+    } else if proxy_only && with_proxy == 0 {
+        (
+            "No clips have a proxy yet",
+            "Make proxies on the Library page for quick frame stepping, or untick Only with a proxy.",
+        )
+    } else {
+        (
+            "Nothing left to time",
+            "Every clip listed is timed. Choose All clips to open one again.",
+        )
+    };
+    picker.empty.set_title(title);
+    picker.empty.set_description(Some(text));
+    picker.views.set_visible_child_name("empty");
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -591,7 +821,7 @@ fn open_clip(p: &Page, clip: Clip) {
     p.scale.set_range(0.0, (frames - 1).max(1) as f64);
     p.scale.set_increments(1.0, fps.round().max(1.0));
     p.following.set(false);
-    p.views.set_visible_child_name("editor");
+    show_picker(p, false);
     p.status.set_text(&match (&draft, &run) {
         (Some(_), _) => "Carrying on with the markers you placed last time (not committed yet).".to_owned(),
         (None, Some(r)) => format!("This clip is {}: its markers are loaded.", r.id),
@@ -716,7 +946,8 @@ fn current_preview(s: &State) -> Option<Preview> {
 fn show(p: &Page) {
     let s = p.state.borrow();
     if s.open.is_none() {
-        p.views.set_visible_child_name("empty");
+        drop(s);
+        show_picker(p, true);
         return;
     }
 
@@ -1353,6 +1584,7 @@ fn keyboard(p: &Page) {
         let p = &page;
         if !p.root.is_mapped()
             || p.state.borrow().open.is_none()
+            || p.views.visible_child_name().as_deref() != Some("editor")
             || p.shared.window.visible_dialog().is_some()
         {
             return glib::Propagation::Proceed;
@@ -1449,6 +1681,89 @@ fn button(title: &str) -> gtk::Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clip(name: &str, recorded: &str, proxy: bool) -> Clip {
+        Clip {
+            path: PathBuf::from("/v").join(name),
+            size: 1,
+            modified_ns: 0,
+            recorded: Some(recorded.into()),
+            recorded_source: "filename".into(),
+            info: Some(MediaInfo {
+                codec: "h264".into(),
+                width: 3840,
+                height: 2160,
+                fps_num: 60000,
+                fps_den: 1001,
+                frames: Some(1000),
+                duration_seconds: Some(227.1),
+                timecode: None,
+                rotation: 0,
+                creation_time: None,
+                has_audio: true,
+            }),
+            probe_error: None,
+            proxy: if proxy {
+                ProxyState::Ready(PathBuf::from("/p").join(name))
+            } else {
+                ProxyState::Missing
+            },
+        }
+    }
+
+    #[test]
+    fn picks_untimed_clips_with_proxies_newest_first() {
+        let clips = [
+            clip("a.MP4", "2026-09-01 10:00:00", true),
+            clip("b.MP4", "2026-09-03 10:00:00", true),
+            clip("c.MP4", "2026-09-02 10:00:00", false),
+            clip("d.MP4", "2026-09-04 10:00:00", true),
+        ];
+        let mut run = timer_core::models::RunRecord::new(
+            "run_1",
+            "lw",
+            "2026-09-03",
+            "b.MP4",
+            59.94,
+            MarkerFrames::new(),
+        );
+        run.source_path = Some("/v/b.MP4".into());
+        let db = TimerDatabase {
+            courses: vec![Course {
+                id: "lw".into(),
+                name: "Lower Woods".into(),
+                sector_count: 1,
+            }],
+            runs: vec![run],
+        };
+        let drafted: HashSet<PathBuf> = [PathBuf::from("/v/d.MP4")].into();
+        let names =
+            |list: Vec<Pickable>| -> Vec<String> { list.iter().map(|c| c.clip.name()).collect() };
+
+        // Default: not timed, with a proxy (a draft isn't timed yet).
+        assert_eq!(
+            names(pickable(&clips, Some(&db), &drafted, true, true)),
+            ["d.MP4", "a.MP4"]
+        );
+        assert_eq!(
+            names(pickable(&clips, Some(&db), &drafted, false, false)),
+            ["d.MP4", "b.MP4", "c.MP4", "a.MP4"]
+        );
+        // Without a database nothing counts as timed.
+        assert_eq!(pickable(&clips, None, &drafted, true, false).len(), 4);
+
+        let all = pickable(&clips, Some(&db), &drafted, false, false);
+        let subtitles: Vec<String> = all.iter().map(pick_subtitle).collect();
+        assert_eq!(
+            subtitles,
+            [
+                "2026-09-04 10:00 · 3:47 · proxy ready · markers placed, not committed",
+                "2026-09-03 10:00 · 3:47 · proxy ready · timed: Lower Woods, run_1",
+                "2026-09-02 10:00 · 3:47 · no proxy (slower to step through)",
+                "2026-09-01 10:00 · 3:47 · proxy ready",
+            ]
+        );
+    }
 
     #[test]
     fn ordinals_read_naturally() {
