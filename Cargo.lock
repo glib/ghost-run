@@ -685,6 +685,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "timer-align"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "timer-render",
+]
+
+[[package]]
 name = "timer-cli"
 version = "0.1.0"
 dependencies = [
@@ -694,6 +704,7 @@ dependencies = [
  "serde_json",
  "serde_norway",
  "tempfile",
+ "timer-align",
  "timer-core",
  "timer-render",
 ]

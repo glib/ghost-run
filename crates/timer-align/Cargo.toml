@@ -1,0 +1,17 @@
+[package]
+name = "timer-align"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Places a clip's markers by lining its footage up with a reference run"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+timer-render = { path = "../timer-render" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

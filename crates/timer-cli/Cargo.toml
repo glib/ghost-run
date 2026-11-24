@@ -16,6 +16,7 @@ chrono.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
 timer-core = { path = "../timer-core" }
+timer-align = { path = "../timer-align" }
 timer-render = { path = "../timer-render" }
 
 [dev-dependencies]

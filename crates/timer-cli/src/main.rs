@@ -1,6 +1,7 @@
 //! `rtimer`: the run-database commands of the Python `resolve-timer` CLI, with
 //! the same arguments and output, so the two can be compared (`scripts/parity.sh`).
 
+mod auto_markers;
 mod render;
 mod selected;
 
@@ -16,6 +17,7 @@ use timer_core::stats::{CourseStats, StatsOptions, compute_course_stats};
 use timer_core::timing::format_duration;
 use timer_core::validation::validate_database;
 
+use auto_markers::AutoMarkersArgs;
 use render::RenderArgs;
 use selected::SelectedArgs;
 
@@ -74,6 +76,11 @@ enum Command {
         mode: Mode,
         #[command(flatten)]
         render: RenderArgs,
+    },
+    /// Place a clip's markers by matching its footage to a reference run (needs ffmpeg)
+    AutoMarkers {
+        #[command(flatten)]
+        args: AutoMarkersArgs,
     },
 }
 
@@ -205,6 +212,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             let payload = overlay_payload(&db, &selected, mode.into())?;
             render::render(payload, &render)?;
         }
+        Command::AutoMarkers { args } => auto_markers::run(&db, &args)?,
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/timer-core", "crates/timer-cli", "crates/timer-render"]
+members = ["crates/timer-core", "crates/timer-cli", "crates/timer-render", "crates/timer-align"]
 
 [workspace.package]
 edition = "2024"

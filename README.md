@@ -123,6 +123,32 @@ resolve-timer --db examples/timer_db.yaml overlay-text --course lower_whistler_a
 
 Marker CSV files need `name,frame` columns.
 
+## Placing markers from a reference run (Rust `rtimer`, in progress)
+
+`rtimer auto-markers` places a new clip's markers for you. It lines the new
+clip's footage up with a run of the same course whose markers are already
+placed, and puts each marker where the new clip passes the same spot. Needs
+ffmpeg on `PATH`.
+
+```powershell
+target\release\rtimer --db timer_db.yaml auto-markers --reference-run run_2026_05_31_001 --clip D:\Media\Runs\GX010150.MP4 --out GX010150_markers.csv
+```
+
+- The reference is a stored run (its `source_path` is its clip, or give
+  `--reference-clip`), or `--reference-markers CSV --reference-clip CLIP --course ID`.
+- It writes a marker CSV (`name,frame,confidence`) that `overlay-text` and
+  `render` read, and prints how well the clip matched, each marker's
+  confidence (low ones are marked `<- check`), and the sector times against
+  the reference run.
+- The new run can be at a different speed (up to 3× either way at any point),
+  frame rate or exposure, and anywhere in the clip.
+- Both clips are read at 64×36 greyscale; that's the slow part for long 4K
+  clips. Decoded clips are cached (in your cache folder, or `--cache-dir`), so a
+  reference clip is only read once. ffmpeg uses a GPU decoder when it finds one.
+- Use a reference ridden on a similar line with the camera in the same place.
+  The match is on what the camera sees, so a very different line, or a
+  different camera mount, matches less well.
+
 ## Overlay as a video file (Rust `rtimer`, in progress)
 
 `rtimer render` writes the overlay as one transparent video to lay over the clip,
