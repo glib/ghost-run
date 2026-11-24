@@ -28,10 +28,11 @@ install: build
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	sed 's|@EXEC@|$(EXEC)|' packaging/$(APP_ID).desktop > $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
 	install -Dm644 packaging/$(APP_ID).svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
-	@command -v update-desktop-database >/dev/null && update-desktop-database $(DESTDIR)$(PREFIX)/share/applications || true
+	@$(if $(DESTDIR),true,sh packaging/refresh-menus.sh $(PREFIX)/share/applications $(PREFIX)/share/icons)
 	@echo "Installed. Launcher runs: $(EXEC)"
 
 uninstall:
 	rm -f $(DESTDIR)$(BIN) $(DESTDIR)$(PREFIX)/bin/rtimer \
 	  $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop \
 	  $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
+	@$(if $(DESTDIR),true,sh packaging/refresh-menus.sh $(PREFIX)/share/applications $(PREFIX)/share/icons)

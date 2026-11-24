@@ -68,6 +68,9 @@ make install
 This installs `ghost-run` and `rtimer` in `~/.local/bin`, and a **Ghost Run**
 launcher with its icon in your app menu. Built inside a distrobox, the launcher
 starts it through `distrobox enter <box>`, since it uses the box's GTK.
+Installing also refreshes the desktop's menu cache (on KDE, `kbuildsycoca6`,
+run on the host from inside a distrobox). If the menu entry still has no icon,
+run `kbuildsycoca6` on the host yourself, or log out and back in.
 `make uninstall` removes them. With no arguments `ghost-run` opens the app;
 `ghost-run --help` lists the headless import commands.
 
