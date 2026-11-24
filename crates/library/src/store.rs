@@ -48,8 +48,8 @@ pub struct Library {
     db: Connection,
 }
 
-/// 1: clips. 2: marker drafts.
-const VERSION: u32 = 2;
+/// 1: clips. 2: marker drafts. 3: course references.
+const VERSION: u32 = 3;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -64,7 +64,7 @@ impl Library {
         let version: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
             version <= VERSION,
-            "{} is from a newer Ghost Run; delete it to rebuild the library",
+            "{} is from a newer Ghost Run: update Ghost Run to open it",
             path.display()
         );
         db.execute_batch(
@@ -88,6 +88,10 @@ impl Library {
                confidence TEXT NOT NULL,
                source TEXT NOT NULL,
                updated_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS course_references (
+               course_id TEXT PRIMARY KEY,
+               run_id TEXT NOT NULL
              );",
         )?;
         db.pragma_update(None, "user_version", VERSION)?;
@@ -224,6 +228,26 @@ impl Library {
         Ok(())
     }
 
+    /// The run chosen as `course_id`'s reference for auto-markers, if one was.
+    pub fn reference(&self, course_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT run_id FROM course_references WHERE course_id = ?1",
+                [course_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_reference(&self, course_id: &str, run_id: &str) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO course_references VALUES (?1, ?2)",
+            [course_id, run_id],
+        )?;
+        Ok(())
+    }
+
     /// Clips with a draft, so the Library can show them.
     pub fn drafted(&self) -> Result<std::collections::HashSet<PathBuf>> {
         let mut stmt = self.db.prepare("SELECT path FROM drafts")?;
@@ -328,6 +352,16 @@ mod tests {
         assert!(lib.drafted().unwrap().contains(clip));
         lib.clear_draft(clip).unwrap();
         assert_eq!(lib.draft(clip).unwrap(), None);
+    }
+
+    #[test]
+    fn remembers_course_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("l.sqlite3")).unwrap();
+        assert_eq!(lib.reference("c").unwrap(), None);
+        lib.set_reference("c", "run_1").unwrap();
+        lib.set_reference("c", "run_2").unwrap();
+        assert_eq!(lib.reference("c").unwrap().as_deref(), Some("run_2"));
     }
 
     #[test]

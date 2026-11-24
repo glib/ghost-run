@@ -8,7 +8,10 @@
 //! - [`proxy`]: half-resolution ProRes Proxy copies in a `Proxy` folder beside
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
+//! - [`auto`]: placing a clip's markers from the course's reference run, and
+//!   telling which course a clip is.
 
+pub mod auto;
 pub mod frames;
 pub mod probe;
 pub mod proxy;

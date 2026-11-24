@@ -14,14 +14,17 @@ use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
+use library::auto::{self, Reference};
 use library::scan::{self, Progress};
-use library::{Cancel, Clip, Library, MediaInfo, ProxyState, proxy};
+use library::{Cancel, Clip, Draft, Library, MediaInfo, ProxyState, proxy};
 
 use crate::shared::{Change, Shared};
 
 enum Command {
     Scan(Vec<PathBuf>),
     Proxies(Vec<(PathBuf, MediaInfo)>),
+    /// Place markers in each clip (path, footage to read) from the best-matching course.
+    AutoPlace(Vec<(PathBuf, PathBuf)>, Vec<Reference>),
 }
 
 enum Reply {
@@ -65,6 +68,7 @@ struct Page {
     rescan: gtk::Button,
     proxies: gtk::Button,
     time: gtk::Button,
+    auto_place: gtk::Button,
     stop: gtk::Button,
 }
 
@@ -114,6 +118,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     toolbar.append(&counts);
     toolbar.append(&filter);
     toolbar.append(&rescan);
+    let auto_place = button("Auto-place ticked");
+    auto_place.set_tooltip_text(Some(
+        "Find each ticked clip's course and place its markers from that course's reference run, as drafts to check on the Time page",
+    ));
+    toolbar.append(&auto_place);
     toolbar.append(&time);
     toolbar.append(&proxies);
     content.append(&toolbar);
@@ -160,6 +169,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         rescan: rescan.clone(),
         proxies: proxies.clone(),
         time: time.clone(),
+        auto_place: auto_place.clone(),
         stop: stop.clone(),
     };
 
@@ -177,6 +187,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     rescan.connect_clicked(move |_| start_scan(&p));
     let p = page.clone();
     proxies.connect_clicked(move |_| confirm_proxies(&p));
+    let p = page.clone();
+    auto_place.connect_clicked(move |_| start_auto(&p));
     let p = page.clone();
     time.connect_clicked(move |_| {
         let one = p.state.borrow().selected.iter().next().cloned();
@@ -322,9 +334,159 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     }
                     let _ = replies.send(Reply::Done(text));
                 }
+                Command::AutoPlace(jobs, references) => {
+                    let _ = replies.send(Reply::Done(auto_place(
+                        &library,
+                        &jobs,
+                        &references,
+                        &cancel,
+                        &replies,
+                    )));
+                }
             }
         }
     });
+}
+
+/// Places markers in each clip from the course that matches it best, as an
+/// `auto` draft; returns what happened.
+fn auto_place(
+    library: &Library,
+    jobs: &[(PathBuf, PathBuf)],
+    references: &[Reference],
+    cancel: &Cancel,
+    replies: &mpsc::Sender<Reply>,
+) -> String {
+    let cache = auto::cache_dir();
+    let (mut placed, mut to_check, mut unmatched, mut failed) = (0, 0, Vec::new(), Vec::new());
+    for (i, (clip, footage)) in jobs.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let name = clip
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let _ = replies.send(Reply::Status(
+            format!("Matching {name} ({} of {})…", i + 1, jobs.len()),
+            Some(i as f64 / jobs.len() as f64),
+        ));
+        match auto::match_courses(references, footage, cache.as_deref()) {
+            Ok(ranked) if ranked[0].match_cost < auto::POOR_MATCH => {
+                let best = &ranked[0];
+                let draft = Draft {
+                    course_id: best.course_id.clone(),
+                    frames: best.markers.clone(),
+                    confidence: best.confidence.clone(),
+                    source: "auto".into(),
+                };
+                match library.set_draft(clip, &draft) {
+                    Ok(()) => {
+                        placed += 1;
+                        if !best.to_check().is_empty() {
+                            to_check += 1;
+                        }
+                    }
+                    Err(e) => failed.push(format!("{name}: {e:#}")),
+                }
+            }
+            Ok(_) => unmatched.push(name),
+            Err(e) => failed.push(format!("{name}: {e:#}")),
+        }
+    }
+    let mut text = format!(
+        "Placed markers in {placed} {}",
+        plural(placed, "clip", "clips")
+    );
+    text.push_str(&match to_check {
+        0 if placed > 0 => ": open each on the Time page to check and commit.".to_owned(),
+        0 => ".".to_owned(),
+        n => format!(
+            " ({n} with markers to check by eye): open each on the Time page to check and commit."
+        ),
+    });
+    if !unmatched.is_empty() {
+        text.push_str(&format!(
+            " No course matched {}: time {} by hand.",
+            unmatched.join(", "),
+            if unmatched.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    if !failed.is_empty() {
+        text.push_str(&format!(" Failed: {}.", failed.join("; ")));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        text.push_str(" Stopped.");
+    }
+    text
+}
+
+/// Auto-places the ticked clips that have neither a run nor a draft yet.
+fn start_auto(p: &Page) {
+    let Some(db_path) = p.shared.settings().run_database.clone() else {
+        p.status
+            .set_text("Choose your run database first (the gear in the sidebar).");
+        return;
+    };
+    let db = match timer_core::TimerDatabase::load(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            p.status
+                .set_text(&format!("The run database couldn't be read: {e}"));
+            return;
+        }
+    };
+    let s = p.state.borrow();
+    let references = match Library::open_default().and_then(|l| auto::references(&db, &l, &s.clips))
+    {
+        Ok(r) if r.is_empty() => {
+            p.status.set_text(
+                "No course has a run with footage to match against yet: time one run on each course by hand first.",
+            );
+            return;
+        }
+        Ok(r) => r,
+        Err(e) => {
+            p.status.set_text(&format!("{e:#}"));
+            return;
+        }
+    };
+    let mut skipped = 0;
+    let jobs: Vec<(PathBuf, PathBuf)> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path) && c.info.is_some())
+        .filter(|c| {
+            let done = s.runs.contains_key(&run_key(&c.path)) || s.drafted.contains(&c.path);
+            skipped += usize::from(done);
+            !done
+        })
+        .map(|c| (c.path.clone(), auto::footage(c)))
+        .collect();
+    drop(s);
+    if jobs.is_empty() {
+        p.status.set_text(
+            "The ticked clips already have runs or drafts: open them on the Time page to place markers again.",
+        );
+        return;
+    }
+    let mut s = p.state.borrow_mut();
+    s.busy = true;
+    drop(s);
+    p.status.set_text(&format!(
+        "Auto-placing {} {}{}…",
+        jobs.len(),
+        plural(jobs.len(), "clip", "clips"),
+        if skipped > 0 {
+            format!(" (skipping {skipped} with runs or drafts)")
+        } else {
+            String::new()
+        }
+    ));
+    p.progress.set_visible(true);
+    refresh_controls(p);
+    let _ = p.tx.send(Command::AutoPlace(jobs, references));
 }
 
 fn scan_summary(r: &scan::ScanReport) -> String {
@@ -378,7 +540,9 @@ fn handle(p: &Page, reply: Reply) {
             p.state.borrow_mut().busy = false;
             p.status.set_text(&text);
             p.progress.set_visible(false);
-            refresh_controls(p);
+            // Auto-placing makes drafts; show them.
+            load_runs(p);
+            refill(p);
         }
     }
 }
@@ -468,6 +632,8 @@ fn refresh_controls(p: &Page) {
     p.rescan.set_sensitive(!s.busy && !no_folders);
     p.proxies.set_sensitive(!s.busy && !s.clips.is_empty());
     p.time.set_sensitive(s.selected.len() == 1);
+    p.auto_place
+        .set_sensitive(!s.busy && !s.selected.is_empty());
     p.proxies.set_label(if s.selected.is_empty() {
         "Make missing proxies"
     } else {
@@ -574,13 +740,16 @@ fn table(p: &Page) -> gtk::ColumnView {
             let clip = object.borrow::<Clip>();
             let s = page.state.borrow();
             let (text, tip) = cell(&s, &clip, index);
+            let ticked = s.selected.contains(&clip.path);
+            // Let go first: ticking the box below runs its handler, which changes the state.
+            drop(s);
             let label = if index == 0 {
                 let row = li.child().and_downcast::<gtk::Box>().unwrap();
                 let check = row
                     .first_child()
                     .and_downcast::<gtk::CheckButton>()
                     .unwrap();
-                check.set_active(s.selected.contains(&clip.path));
+                check.set_active(ticked);
                 check.update_property(&[gtk::accessible::Property::Label(&format!(
                     "Select {}",
                     clip.name()
