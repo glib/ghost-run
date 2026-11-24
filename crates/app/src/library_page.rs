@@ -1,5 +1,8 @@
 //! The Library page: every clip in your footage folders, when it was recorded,
-//! whether it has a proxy, and which stored run (if any) it is.
+//! whether it has a proxy, and which stored run (if any) it is: its course,
+//! lap and place. A Courses panel filters by course (or clips not timed yet)
+//! and adds and renames courses. Timing a clip opens the Time page over the
+//! Library, with a back arrow.
 //!
 //! Scans and proxy encodes run on a worker thread (`worker`); the page sends it
 //! [`Command`]s and polls its [`Reply`]s, like the Import page does.
@@ -17,6 +20,8 @@ use gtk::{gio, glib};
 use library::auto::{self, Reference};
 use library::scan::{self, Progress};
 use library::{Cancel, Clip, Draft, Library, MediaInfo, ProxyState, proxy};
+use timer_core::board::course_board;
+use timer_core::timing::format_duration;
 
 use crate::shared::{Change, Shared};
 
@@ -38,12 +43,36 @@ enum Reply {
     Error(String),
 }
 
+/// A stored run, as the Library shows it beside its clip.
+#[derive(Debug, Clone, PartialEq)]
+struct RunInfo {
+    id: String,
+    course_id: String,
+    course: String,
+    lap: Option<f64>,
+    /// Its place on the course's board (counted runs only).
+    rank: Option<usize>,
+    ignored: bool,
+}
+
+/// Which clips the table shows.
+#[derive(Debug, Clone, PartialEq)]
+enum View {
+    All,
+    /// No stored run yet (drafts included).
+    Untimed,
+    Course(String),
+}
+
 struct State {
     /// The folders the last scan covered.
     scanned: Vec<PathBuf>,
     clips: Vec<Clip>,
-    /// Lower-case clip file name → "course · run id".
-    runs: HashMap<String, String>,
+    /// Lower-case clip file name → its run.
+    runs: HashMap<String, RunInfo>,
+    /// The database's courses: id, name.
+    courses: Vec<(String, String)>,
+    view: View,
     runs_error: Option<String>,
     /// Clips with markers placed but not committed.
     drafted: HashSet<PathBuf>,
@@ -71,11 +100,41 @@ struct Page {
     proxies: gtk::Button,
     time: gtk::Button,
     auto_place: gtk::Button,
+    move_course: gtk::Button,
     stop: gtk::Button,
+    course_list: gtk::ListBox,
+    rename: gtk::Button,
+    /// Set while the course list is rebuilt, so its selection isn't taken as a click.
+    filling: Rc<std::cell::Cell<bool>>,
 }
 
-/// Builds the page; the returned widget goes in the app's stack.
+/// Builds the page (with the Time page that opens over it); the returned
+/// widget goes in the app's stack.
 pub fn page(shared: &Shared) -> gtk::Widget {
+    let nav = adw::NavigationView::new();
+    let library = library_view(shared);
+    nav.add(
+        &adw::NavigationPage::builder()
+            .child(&library)
+            .title("Library")
+            .tag("library")
+            .build(),
+    );
+    let time = adw::NavigationPage::builder()
+        .child(&crate::time_page::page(shared))
+        .title("Time a run")
+        .tag("time")
+        .build();
+    let nav2 = nav.clone();
+    shared.subscribe(move |change| {
+        if change == Change::TimeClip && nav2.visible_page().as_ref() != Some(&time) {
+            nav2.push(&time);
+        }
+    });
+    nav.upcast()
+}
+
+fn library_view(shared: &Shared) -> gtk::Widget {
     let window = &shared.window;
     let (tx, commands) = mpsc::channel();
     let (replies, rx) = mpsc::channel();
@@ -87,8 +146,13 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     header.set_title_widget(Some(&adw::WindowTitle::new("Library", "")));
     let folders = button("Folders…");
     folders.set_tooltip_text(Some("Footage folders, run database and Resolve template"));
-
+    let open_file = button("Open file…");
+    open_file.set_tooltip_text(Some("Time a clip that isn't in your footage folders"));
+    let rescan = button("Rescan");
+    rescan.set_tooltip_text(Some("Look for new, changed and removed clips"));
     header.pack_end(&folders);
+    header.pack_end(&open_file);
+    header.pack_end(&rescan);
     root.append(&header);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -108,9 +172,9 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let counts = label("", "heading");
     counts.set_hexpand(true);
+    counts.set_wrap(true);
     let filter = gtk::DropDown::from_strings(&["All clips", "Without a proxy"]);
     filter.update_property(&[gtk::accessible::Property::Label("Which clips to show")]);
-    let rescan = button("Rescan");
     let proxies = button("Make proxies");
     proxies.add_css_class("suggested-action");
     let time = button("Time it");
@@ -119,15 +183,40 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     ));
     toolbar.append(&counts);
     toolbar.append(&filter);
-    toolbar.append(&rescan);
-    let auto_place = button("Auto-place ticked");
+    let auto_place = button("Auto-place");
     auto_place.set_tooltip_text(Some(
-        "Find each ticked clip's course and place its markers from that course's reference run, as drafts to check on the Time page",
+        "Find each ticked clip's course and place its markers from that course's reference run, as drafts to check and commit",
     ));
     toolbar.append(&auto_place);
+    let move_course = button("Course…");
+    move_course.set_tooltip_text(Some("Move the ticked clips' runs to another course"));
+    toolbar.append(&move_course);
     toolbar.append(&time);
     toolbar.append(&proxies);
     content.append(&toolbar);
+
+    // The Courses panel: all clips, those not timed yet, and each course.
+    let course_list = gtk::ListBox::new();
+    course_list.add_css_class("navigation-sidebar");
+    course_list.update_property(&[gtk::accessible::Property::Label("Show clips by course")]);
+    let course_scroller = gtk::ScrolledWindow::builder()
+        .child(&course_list)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
+    let add_course = button("New…");
+    add_course.set_tooltip_text(Some("Add a course"));
+    let rename = button("Rename…");
+    rename.set_tooltip_text(Some("Rename the selected course"));
+    let course_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    course_buttons.set_homogeneous(true);
+    course_buttons.append(&add_course);
+    course_buttons.append(&rename);
+    let course_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    course_panel.set_size_request(180, -1);
+    course_panel.append(&label("Courses", "heading"));
+    course_panel.append(&course_scroller);
+    course_panel.append(&course_buttons);
 
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let footer = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -152,6 +241,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             scanned: Vec::new(),
             clips: Vec::new(),
             runs: HashMap::new(),
+            courses: Vec::new(),
+            view: View::All,
             runs_error: None,
             drafted: HashSet::new(),
             selected: HashSet::new(),
@@ -172,7 +263,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         proxies: proxies.clone(),
         time: time.clone(),
         auto_place: auto_place.clone(),
+        move_course: move_course.clone(),
         stop: stop.clone(),
+        course_list: course_list.clone(),
+        rename: rename.clone(),
+        filling: Rc::default(),
     };
 
     let table = table(&page);
@@ -182,7 +277,15 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         .min_content_height(160)
         .build();
     content.append(&scroller);
-    root.append(&content);
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+    body.set_vexpand(true);
+    body.add_css_class("content");
+    content.remove_css_class("content");
+    content.set_hexpand(true);
+    body.append(&course_panel);
+    body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    body.append(&content);
+    root.append(&body);
     root.append(&footer);
 
     let p = page.clone();
@@ -197,6 +300,58 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         if let Some(path) = one {
             p.shared.time_clip(path);
         }
+    });
+    let p = page.clone();
+    open_file.connect_clicked(move |_| choose_file(&p));
+    let p = page.clone();
+    move_course.connect_clicked(move |_| move_ticked(&p));
+    let p = page.clone();
+    course_list.connect_row_selected(move |_, row| {
+        if p.filling.get() {
+            return;
+        }
+        let Some(row) = row else { return };
+        let name = row.widget_name();
+        let view = match name.as_str() {
+            "untimed" => View::Untimed,
+            n => match n.strip_prefix("course:") {
+                Some(id) => View::Course(id.to_owned()),
+                None => View::All,
+            },
+        };
+        let mut s = p.state.borrow_mut();
+        if s.view != view {
+            s.view = view;
+            s.selected.clear();
+            drop(s);
+            refill(&p);
+        }
+    });
+    let p = page.clone();
+    add_course.connect_clicked(move |_| {
+        let p2 = p.clone();
+        crate::courses::new_course(&p.shared, move |result| match result {
+            Ok((id, text)) => {
+                p2.state.borrow_mut().view = View::Course(id);
+                fill_courses(&p2);
+                refill(&p2);
+                p2.status.set_text(&text);
+            }
+            Err(e) => p2.status.set_text(&e),
+        });
+    });
+    let p = page.clone();
+    rename.connect_clicked(move |_| {
+        let s = p.state.borrow();
+        let View::Course(id) = &s.view else { return };
+        let Some((id, name)) = s.courses.iter().find(|(c, _)| c == id).cloned() else {
+            return;
+        };
+        drop(s);
+        let p2 = p.clone();
+        crate::courses::rename_course(&p.shared, &id, &name, move |result| {
+            p2.status.set_text(&result.unwrap_or_else(|e| e));
+        });
     });
     let p = page.clone();
     stop.connect_clicked(move |_| {
@@ -214,10 +369,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
     shared.subscribe(move |change| {
-        if matches!(change, Change::TimeClip | Change::Render) {
+        if matches!(change, Change::TimeClip | Change::Render | Change::Resolve) {
             return;
         }
         load_runs(&p);
+        fill_courses(&p);
         refill(&p);
         let folders = p.shared.settings().footage_folders.clone();
         if change == Change::Settings && folders != p.state.borrow().scanned {
@@ -234,6 +390,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     });
 
     load_runs(&page);
+    fill_courses(&page);
     if let Some(e) = &shared.load_error {
         page.status.set_text(e);
     }
@@ -453,11 +610,9 @@ fn auto_place(
         plural(placed, "clip", "clips")
     );
     text.push_str(&match to_check {
-        0 if placed > 0 => ": open each on the Time page to check and commit.".to_owned(),
+        0 if placed > 0 => ": double-click each to check and commit.".to_owned(),
         0 => ".".to_owned(),
-        n => format!(
-            " ({n} with markers to check by eye): open each on the Time page to check and commit."
-        ),
+        n => format!(" ({n} with markers to check by eye): double-click each to check and commit."),
     });
     if !unmatched.is_empty() {
         text.push_str(&format!(
@@ -520,7 +675,7 @@ fn start_auto(p: &Page) {
     drop(s);
     if jobs.is_empty() {
         p.status.set_text(
-            "The ticked clips already have runs or drafts: open them on the Time page to place markers again.",
+            "The ticked clips already have runs or drafts: double-click one to place its markers again.",
         );
         return;
     }
@@ -568,6 +723,7 @@ fn handle(p: &Page, reply: Reply) {
             s.selected.retain(|path| present.contains(path));
             s.clips = clips;
             drop(s);
+            fill_courses(p);
             refill(p);
         }
         Reply::Status(text, fraction) => {
@@ -599,6 +755,7 @@ fn handle(p: &Page, reply: Reply) {
             p.progress.set_visible(false);
             // Auto-placing makes drafts; show them.
             load_runs(p);
+            fill_courses(p);
             refill(p);
         }
     }
@@ -691,11 +848,13 @@ fn refresh_controls(p: &Page) {
     p.time.set_sensitive(s.selected.len() == 1);
     p.auto_place
         .set_sensitive(!s.busy && !s.selected.is_empty());
-    p.proxies.set_label(if s.selected.is_empty() {
-        "Make missing proxies"
+    p.move_course.set_sensitive(!ticked_runs(&s).is_empty());
+    p.rename.set_sensitive(matches!(s.view, View::Course(_)));
+    p.proxies.set_tooltip_text(Some(if s.selected.is_empty() {
+        "Make a proxy for every clip without one"
     } else {
-        "Make proxies for ticked"
-    });
+        "Make proxies for the ticked clips"
+    }));
     p.stop.set_visible(s.busy);
     let with_proxy = s
         .clips
@@ -717,6 +876,7 @@ fn refill(p: &Page) {
         .clips
         .iter()
         .filter(|c| !s.only_missing || !matches!(c.proxy, ProxyState::Ready(_)))
+        .filter(|c| shown_in(&s.view, s.runs.get(&run_key(&c.path))))
         .map(|c| glib::BoxedAnyObject::new(c.clone()))
         .collect();
     drop(s);
@@ -725,14 +885,16 @@ fn refill(p: &Page) {
     refresh_controls(p);
 }
 
-const COLUMNS: &[(&str, i32)] = &[
-    ("Clip", 240),
-    ("Recorded", 175),
-    ("Length", 70),
-    ("Video", 190),
-    ("Proxy", 90),
-    ("Run", 200),
-    ("Folder", 200),
+/// Title, width, and which cell ([`cell`]) each column shows, in order.
+const COLUMNS: &[(&str, i32, usize)] = &[
+    ("Clip", 240, 0),
+    ("Course", 170, 5),
+    ("Lap", 120, 6),
+    ("Recorded", 175, 1),
+    ("Length", 70, 2),
+    ("Proxy", 90, 4),
+    ("Video", 190, 3),
+    ("Folder", 200, 7),
 ];
 
 fn table(p: &Page) -> gtk::ColumnView {
@@ -751,14 +913,14 @@ fn table(p: &Page) -> gtk::ColumnView {
         }
     });
     view.set_show_row_separators(true);
-    for (index, (title, width)) in COLUMNS.iter().enumerate() {
+    for &(title, width, index) in COLUMNS {
         let factory = gtk::SignalListItemFactory::new();
         let page = p.clone();
         factory.connect_setup(move |_, item| {
             let li = item.downcast_ref::<gtk::ListItem>().unwrap();
             let text = label("", if index == 4 { "status" } else { "" });
             // Names and folders can be shortened; the rest is short and must show whole.
-            if matches!(index, 0 | 5 | 6) {
+            if matches!(index, 0 | 5 | 7) {
                 text.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
             }
             if index == 0 {
@@ -829,7 +991,7 @@ fn table(p: &Page) -> gtk::ColumnView {
             }
         });
         let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-        column.set_fixed_width(*width);
+        column.set_fixed_width(width);
         column.set_resizable(true);
         column.set_expand(index == 0);
         view.append_column(&column);
@@ -897,16 +1059,37 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                 ProxyState::Missing => ("None".into(), None),
             }
         }
-        5 => match s.runs.get(&run_key(&clip.path)) {
-            Some(run) if s.drafted.contains(&clip.path) => (
-                format!("{run} (changed)"),
-                Some("Markers changed on the Time page, not committed yet".into()),
-            ),
-            Some(run) => (run.clone(), None),
-            None if s.drafted.contains(&clip.path) => (
-                "Draft".into(),
-                Some("Markers placed on the Time page, not committed yet".into()),
-            ),
+        5 => {
+            let run = s.runs.get(&run_key(&clip.path));
+            let drafted = s.drafted.contains(&clip.path);
+            match run {
+                Some(r) => {
+                    let mut text = r.course.clone();
+                    if r.ignored {
+                        text.push_str(" (ignored)");
+                    }
+                    if drafted {
+                        text.push_str(" (changed)");
+                    }
+                    let tip = if drafted {
+                        format!("{}: markers changed, not committed yet", r.id)
+                    } else {
+                        r.id.clone()
+                    };
+                    (text, Some(tip))
+                }
+                None if drafted => (
+                    "Draft".into(),
+                    Some(
+                        "Markers placed, not committed yet: double-click to check and commit"
+                            .into(),
+                    ),
+                ),
+                None => (String::new(), None),
+            }
+        }
+        6 => match s.runs.get(&run_key(&clip.path)) {
+            Some(r) => (lap_text(r), None),
             None => (String::new(), None),
         },
         _ => {
@@ -937,6 +1120,7 @@ fn load_runs(p: &Page) {
     let path = p.shared.settings().run_database.clone();
     let mut s = p.state.borrow_mut();
     s.runs.clear();
+    s.courses.clear();
     s.runs_error = None;
     s.drafted = Library::open_default()
         .and_then(|l| l.drafted())
@@ -944,17 +1128,189 @@ fn load_runs(p: &Page) {
     let Some(path) = path else { return };
     match timer_core::TimerDatabase::load(&path) {
         Ok(db) => {
-            for run in &db.runs {
-                let course = db
-                    .course_by_id(&run.course_id)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_else(|_| run.course_id.clone());
-                let key = run_key(Path::new(&run.filename));
-                s.runs.insert(key, format!("{course} · {}", run.id));
-            }
+            s.runs = runs_by_clip(&db);
+            s.courses = db
+                .courses
+                .iter()
+                .map(|c| (c.id.clone(), c.name.clone()))
+                .collect();
         }
         Err(e) => s.runs_error = Some(format!("The run database couldn't be read: {e}")),
     }
+    if let View::Course(id) = &s.view
+        && !s.courses.iter().any(|(c, _)| c == id)
+    {
+        s.view = View::All;
+    }
+}
+
+/// Each run by the name its clip would have ([`run_key`]), with its course,
+/// lap and place on the course's board.
+fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
+    let mut places: HashMap<&str, (Option<f64>, Option<usize>)> = HashMap::new();
+    let boards: Vec<_> = db
+        .courses
+        .iter()
+        .map(|c| course_board(c, &db.runs))
+        .collect();
+    for board in &boards {
+        for row in &board.rows {
+            places.insert(row.run_id.as_str(), (row.lap_seconds, row.rank));
+        }
+    }
+    db.runs
+        .iter()
+        .map(|run| {
+            let course = db
+                .course_by_id(&run.course_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|_| run.course_id.clone());
+            let (lap, rank) = places.get(run.id.as_str()).copied().unwrap_or_default();
+            (
+                run_key(Path::new(&run.filename)),
+                RunInfo {
+                    id: run.id.clone(),
+                    course_id: run.course_id.clone(),
+                    course,
+                    lap,
+                    rank,
+                    ignored: run.ignored,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Whether a clip with this run (or none) shows in `view`.
+fn shown_in(view: &View, run: Option<&RunInfo>) -> bool {
+    match view {
+        View::All => true,
+        View::Untimed => run.is_none(),
+        View::Course(id) => run.is_some_and(|r| &r.course_id == id),
+    }
+}
+
+/// "2:31.400 · 3rd", or just the lap for a run that isn't ranked.
+fn lap_text(r: &RunInfo) -> String {
+    let Some(lap) = r.lap.and_then(|l| format_duration(l).ok()) else {
+        return String::new();
+    };
+    match r.rank {
+        Some(1) => format!("{lap} · best"),
+        Some(n) => format!("{lap} · #{n}"),
+        None => lap,
+    }
+}
+
+/// The run ids of the ticked clips that have runs.
+fn ticked_runs(s: &State) -> Vec<String> {
+    let mut ids: Vec<String> = s
+        .selected
+        .iter()
+        .filter_map(|path| s.runs.get(&run_key(path)).map(|r| r.id.clone()))
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Rebuilds the Courses panel: all clips, not timed yet, and each course
+/// with how many clips are on it; keeps the selection.
+fn fill_courses(p: &Page) {
+    let s = p.state.borrow();
+    let count = |view: &View| {
+        s.clips
+            .iter()
+            .filter(|c| shown_in(view, s.runs.get(&run_key(&c.path))))
+            .count()
+    };
+    let mut rows: Vec<(String, String, usize)> = vec![
+        ("all".into(), "All clips".into(), s.clips.len()),
+        (
+            "untimed".into(),
+            "Not timed yet".into(),
+            count(&View::Untimed),
+        ),
+    ];
+    for (id, name) in &s.courses {
+        rows.push((
+            format!("course:{id}"),
+            name.clone(),
+            count(&View::Course(id.clone())),
+        ));
+    }
+    let selected = match &s.view {
+        View::All => "all".to_owned(),
+        View::Untimed => "untimed".to_owned(),
+        View::Course(id) => format!("course:{id}"),
+    };
+    drop(s);
+    p.filling.set(true);
+    while let Some(row) = p.course_list.first_child() {
+        p.course_list.remove(&row);
+    }
+    for (key, name, n) in rows {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let title = label(&name, "");
+        title.set_hexpand(true);
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        line.append(&title);
+        line.append(&label(&n.to_string(), "dim-label"));
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&line));
+        row.set_widget_name(&key);
+        row.set_tooltip_text(Some(&name));
+        row.update_property(&[gtk::accessible::Property::Label(&format!("{name}, {n}"))]);
+        let is_selected = key == selected;
+        p.course_list.append(&row);
+        if is_selected {
+            p.course_list.select_row(Some(&row));
+        }
+    }
+    p.filling.set(false);
+}
+
+/// Moves the ticked clips' runs to another course.
+fn move_ticked(p: &Page) {
+    let s = p.state.borrow();
+    let ids = ticked_runs(&s);
+    let courses: HashSet<&str> = s
+        .selected
+        .iter()
+        .filter_map(|path| s.runs.get(&run_key(path)).map(|r| r.course_id.as_str()))
+        .collect();
+    let from = (courses.len() == 1).then(|| courses.iter().next().unwrap().to_string());
+    drop(s);
+    if ids.is_empty() {
+        return;
+    }
+    let p2 = p.clone();
+    crate::courses::move_runs(&p.shared, ids, from.as_deref(), move |result| {
+        p2.state.borrow_mut().selected.clear();
+        refill(&p2);
+        p2.status.set_text(&result.unwrap_or_else(|e| e));
+    });
+}
+
+/// Times a clip from anywhere, not just the footage folders.
+fn choose_file(p: &Page) {
+    let dialog = gtk::FileDialog::new();
+    dialog.set_title("Open a clip to time");
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some("Video"));
+    filter.add_mime_type("video/*");
+    for pattern in ["*.mp4", "*.MP4", "*.mov", "*.MOV"] {
+        filter.add_pattern(pattern);
+    }
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    dialog.set_filters(Some(&filters));
+    let shared = p.shared.clone();
+    dialog.open(Some(&p.window), gio::Cancellable::NONE, move |result| {
+        if let Ok(Some(path)) = result.map(|f| f.path()) {
+            shared.time_clip(path);
+        }
+    });
 }
 
 fn duration(seconds: f64) -> String {
@@ -990,6 +1346,44 @@ mod tests {
         assert_eq!(run_key(Path::new("/v/GX010150.MP4.mov")), "gx010150.mp4");
         assert_eq!(run_key(Path::new("/v/GX010150.MP4")), "gx010150.mp4");
         assert_eq!(run_key(Path::new("/v/run.mov")), "run.mov");
+    }
+
+    #[test]
+    fn shows_each_clips_course_lap_and_place() {
+        use timer_core::models::{Course, MarkerFrames, RunRecord};
+        let run = |id: &str, file: &str, finish: i64, ignored: bool| {
+            let frames: MarkerFrames =
+                [("Start".to_owned(), 0), ("Finish".to_owned(), finish)].into();
+            let mut r = RunRecord::new(id, "lw", "2026-09-01", file, 30.0, frames);
+            r.ignored = ignored;
+            r
+        };
+        let db = timer_core::TimerDatabase {
+            courses: vec![Course {
+                id: "lw".into(),
+                name: "Lower Woods".into(),
+                sector_count: 1,
+            }],
+            runs: vec![
+                run("r1", "A.MP4", 300, false),
+                run("r2", "B.MP4", 270, false),
+                run("r3", "C.MP4", 240, true),
+            ],
+        };
+        let runs = runs_by_clip(&db);
+        let a = &runs["a.mp4"];
+        assert_eq!((a.course.as_str(), a.rank), ("Lower Woods", Some(2)));
+        assert_eq!(lap_text(a), "0:10.000 · #2");
+        assert_eq!(lap_text(&runs["b.mp4"]), "0:09.000 · best");
+        // Ignored: its lap, no place.
+        assert_eq!(lap_text(&runs["c.mp4"]), "0:08.000");
+
+        assert!(shown_in(&View::All, None));
+        assert!(shown_in(&View::Untimed, None));
+        assert!(!shown_in(&View::Untimed, Some(a)));
+        assert!(shown_in(&View::Course("lw".into()), Some(a)));
+        assert!(!shown_in(&View::Course("other".into()), Some(a)));
+        assert!(!shown_in(&View::Course("lw".into()), None));
     }
 
     #[test]

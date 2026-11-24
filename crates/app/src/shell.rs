@@ -6,18 +6,12 @@ use adw::prelude::*;
 /// page (the old resolve-ingest window, with its own header bar).
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
-    let pages: [(&str, &str, &str, gtk::Widget); 5] = [
+    let pages: [(&str, &str, &str, gtk::Widget); 4] = [
         (
             "library",
             "Library",
             "folder-videos-symbolic",
             crate::library_page::page(&shared),
-        ),
-        (
-            "time",
-            "Time",
-            "alarm-symbolic",
-            crate::time_page::page(&shared),
         ),
         (
             "runs",
@@ -79,11 +73,11 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         }
         split2.set_show_content(true);
     });
-    // A clip picked to be timed opens the Time page.
+    // A clip picked to be timed opens over the Library (library_page).
     let list2 = list.clone();
     shared.subscribe(move |change| match change {
         crate::shared::Change::TimeClip => {
-            select(&list2, "time");
+            select(&list2, "library");
         }
         crate::shared::Change::Render | crate::shared::Change::Resolve => {
             select(&list2, "output");
@@ -95,7 +89,7 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     if !select(&list, &start) {
         list.select_row(list.row_at_index(0).as_ref());
     }
-    // GHOST_RUN_CLIP=<path> opens that clip on the Time page: for screenshots.
+    // GHOST_RUN_CLIP=<path> opens that clip to time: for screenshots.
     if let Some(clip) = std::env::var_os("GHOST_RUN_CLIP") {
         shared.time_clip(clip.into());
     }
