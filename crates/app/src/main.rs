@@ -73,6 +73,10 @@ enum Action {
 }
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Settings and history from the separate resolve-ingest app move over once.
+    if let Err(e) = settings::move_from_resolve_ingest() {
+        eprintln!("ghost-run: {e:#}");
+    }
     if cli.command.is_none() || matches!(cli.command, Some(Action::Demo)) {
         ui::run(matches!(cli.command, Some(Action::Demo)));
         return Ok(());

@@ -1,5 +1,5 @@
 //! The app's own settings, in `$XDG_CONFIG_HOME/ghost-run/settings.toml`.
-//! (The Import page keeps its settings where resolve-ingest kept them.)
+//! (The Import page keeps its own in `ghost-run/import`.)
 
 use std::path::{Path, PathBuf};
 

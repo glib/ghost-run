@@ -17,19 +17,24 @@ use tokio::{
 pub const PROFILE: &str = "primary-motion-video-copy/all-audio-pcm_s24le/mov/full-decode/v1";
 
 /// Locate the media tools shipped with an installation before consulting PATH.
-/// `RESOLVE_INGEST_FFMPEG_DIR` is useful for portable installs and development.
+/// `GHOST_RUN_FFMPEG_DIR` (or the older `RESOLVE_INGEST_FFMPEG_DIR`) is useful
+/// for portable installs and development.
 pub fn tool_path(tool: &str) -> PathBuf {
     let names = [tool.to_string(), format!("{tool}.bin")];
     let mut dirs = Vec::new();
-    if let Some(dir) = std::env::var_os("RESOLVE_INGEST_FFMPEG_DIR") {
-        dirs.push(PathBuf::from(dir));
+    for var in ["GHOST_RUN_FFMPEG_DIR", "RESOLVE_INGEST_FFMPEG_DIR"] {
+        if let Some(dir) = std::env::var_os(var) {
+            dirs.push(PathBuf::from(dir));
+        }
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
     {
+        dirs.push(parent.join("../libexec/ghost-run"));
         dirs.push(parent.join("../libexec/resolve-ingest"));
         dirs.push(parent.join("ffmpeg"));
     }
+    dirs.push(PathBuf::from("/usr/libexec/ghost-run"));
     dirs.push(PathBuf::from("/usr/libexec/resolve-ingest"));
     for dir in dirs {
         for name in &names {

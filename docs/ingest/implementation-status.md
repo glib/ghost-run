@@ -14,7 +14,7 @@ Implemented on 2026-09-04. This is a working initial application with a desktop 
 - Child supervision, inherited process lock, SIGTERM/escalation/wait cancellation, parent-death handling, blocked-share status, and two bounded retries for transient I/O errors.
 - Three bounded processing lanes with two active assets: concurrent archive/local copies, one queued conversion/verification worker for ingest and two independent conversion/verification workers for Convert batches, local-input/archive checksum matching before editing publication, temporary-space reservation, journaled staging cleanup, and separate live activity lines.
 - Release build, desktop entry/icon, user-prefix installation Makefile, CI, setup/storage documentation, and a reproducible real-sample harness.
-- Media-tool resolution prefers an installation-local `libexec/resolve-ingest/ffmpeg` and `ffprobe`, supports `RESOLVE_INGEST_FFMPEG_DIR`, and falls back to PATH. The Makefile can install a separately built LGPL-only FFmpeg runtime without linking it into the MIT application.
+- Media-tool resolution prefers an installation-local `libexec/ghost-run/ffmpeg` and `ffprobe` (then the older `libexec/resolve-ingest`), supports `GHOST_RUN_FFMPEG_DIR` (and the older `RESOLVE_INGEST_FFMPEG_DIR`), and falls back to PATH. The Makefile can install a separately built LGPL-only FFmpeg runtime without linking it into the MIT application.
 
 ## Automated checks performed
 

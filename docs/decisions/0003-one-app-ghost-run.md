@@ -21,8 +21,9 @@ Resolve.
 - **One repository:** resolve-ingest is merged in with its history.
   - `crates/ingest` is the headless core.
   - `crates/app` is the GTK app, and the Import page is the old ingest window.
-  - resolve-ingest is archived on GitHub. Its settings and journal keep their
-    `resolve-ingest` folder names, so existing setups carry over.
+  - resolve-ingest is archived on GitHub. Its settings and journal moved to
+    `ghost-run/import` (moved over from the old `resolve-ingest` folders on
+    first start), so existing setups carry over.
 - **Linux only.** It installs with `make install` to `~/.local`, plus a
   launcher and icon (through `distrobox enter` when built in a distrobox). The
   old Flatpak packaging was dropped: a sandboxed app could only reach Resolve's

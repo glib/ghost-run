@@ -412,7 +412,7 @@ fn build(app: &adw::Application, demo: bool) {
         drop(s);
         let dialog = gtk::FileDialog::builder()
             .title("Export batch report")
-            .initial_name(format!("resolve-ingest-{id}.json"))
+            .initial_name(format!("ghost-run-import-{id}.json"))
             .build();
         let v2 = v.clone();
         dialog.save(Some(&v.window), gio::Cancellable::NONE, move |r| {
@@ -1509,7 +1509,7 @@ fn history_dialog(v: &View, batches: Vec<Batch>) {
         report.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Export batch report")
-                .initial_name(format!("resolve-ingest-{id}.json"))
+                .initial_name(format!("ghost-run-import-{id}.json"))
                 .build();
             let v = v2.clone();
             let id = id.clone();
