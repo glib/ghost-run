@@ -35,6 +35,8 @@ struct Job {
 enum Reply {
     Progress(String, f64),
     Finished(String, Result<Rendered, String>),
+    /// What Resolve said: its status, or what adding overlays did.
+    Resolve(Result<String, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,10 +77,14 @@ struct Page {
     stop: gtk::Button,
     clear: gtk::Button,
     status: gtk::Label,
+    resolve_status: gtk::Label,
+    resolve_buttons: gtk::Box,
+    add_to_resolve: gtk::Button,
+    replies: mpsc::Sender<Reply>,
 }
 
 pub fn page(shared: &Shared) -> gtk::Widget {
-    let (jobs, replies) = worker();
+    let (jobs, replies, reply_tx) = worker();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("Output", "")));
@@ -146,6 +152,30 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         .build();
     views.add_named(&scroller, Some("list"));
     content.append(&views);
+
+    let resolve_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    resolve_row.add_css_class("locations");
+    let resolve_text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    resolve_text.set_hexpand(true);
+    resolve_text.append(&label("DaVinci Resolve", "heading"));
+    let resolve_status = label("Not checked yet.", "dim-label");
+    resolve_status.set_wrap(true);
+    resolve_text.append(&resolve_status);
+    resolve_row.append(&resolve_text);
+    let resolve_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    resolve_buttons.set_valign(gtk::Align::Center);
+    let check = button("Check");
+    check.set_tooltip_text(Some(
+        "See whether Resolve is running and which project is open",
+    ));
+    let add_to_resolve = button("Add to open timeline");
+    add_to_resolve.set_tooltip_text(Some(
+        "Put each finished overlay on the track above its clip in Resolve's current timeline",
+    ));
+    resolve_buttons.append(&check);
+    resolve_buttons.append(&add_to_resolve);
+    resolve_row.append(&resolve_buttons);
+    content.append(&resolve_row);
     root.append(&content);
 
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -172,6 +202,10 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         stop: stop.clone(),
         clear: clear.clone(),
         status,
+        resolve_status,
+        resolve_buttons,
+        add_to_resolve: add_to_resolve.clone(),
+        replies: reply_tx,
     };
 
     compare.set_selected(match shared.settings().comparison {
@@ -193,6 +227,15 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     change_folder.connect_clicked(move |_| crate::settings_dialog::open(&p.shared));
     let p = page.clone();
     add.connect_clicked(move |_| add_unrendered(&p));
+    let p = page.clone();
+    check.connect_clicked(move |_| ask_resolve(&p, None));
+    let p = page.clone();
+    add_to_resolve.connect_clicked(move |_| {
+        let items = finished(&p);
+        if !items.is_empty() {
+            ask_resolve(&p, Some(items));
+        }
+    });
     let p = page.clone();
     start.connect_clicked(move |_| {
         let mut s = p.state.borrow_mut();
@@ -244,7 +287,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     root.upcast()
 }
 
-type Worker = ((mpsc::Sender<Job>, Arc<AtomicBool>), mpsc::Receiver<Reply>);
+type Worker = (
+    (mpsc::Sender<Job>, Arc<AtomicBool>),
+    mpsc::Receiver<Reply>,
+    mpsc::Sender<Reply>,
+);
 
 /// Renders each job sent, one at a time.
 fn worker() -> Worker {
@@ -252,6 +299,7 @@ fn worker() -> Worker {
     let (replies, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = cancel.clone();
+    let others = replies.clone();
     std::thread::spawn(move || {
         for job in jobs {
             let id = job.run_id.clone();
@@ -261,7 +309,7 @@ fn worker() -> Worker {
             }
         }
     });
-    ((tx, cancel), rx)
+    ((tx, cancel), rx, others)
 }
 
 fn render(
@@ -334,7 +382,117 @@ fn handle(p: &Page, reply: Reply) {
             drop(s);
             next(p);
         }
+        Reply::Resolve(result) => {
+            p.resolve_buttons.set_sensitive(true);
+            match result {
+                Ok(text) => {
+                    p.resolve_status.remove_css_class("error");
+                    p.resolve_status.set_text(&text);
+                }
+                Err(text) => {
+                    p.resolve_status.add_css_class("error");
+                    p.resolve_status.set_text(&text);
+                }
+            }
+            show(p);
+        }
     }
+}
+
+/// The finished overlays in the list, as the bridge wants them.
+fn finished(p: &Page) -> Vec<(String, PathBuf, PathBuf)> {
+    p.state
+        .borrow()
+        .items
+        .iter()
+        .filter(|i| matches!(i.status, Status::Done(_)))
+        .filter_map(|i| Some((i.run_id.clone(), i.clip.clone()?, i.out.clone()?)))
+        .collect()
+}
+
+/// Asks Resolve for its status, or (with `items`) to add those overlays, on
+/// a thread of its own: Resolve can take a while to answer.
+fn ask_resolve(p: &Page, items: Option<Vec<(String, PathBuf, PathBuf)>>) {
+    let container = p.shared.settings().resolve_container.clone();
+    let tx = p.replies.clone();
+    p.resolve_buttons.set_sensitive(false);
+    p.resolve_status.remove_css_class("error");
+    p.resolve_status.set_text(match items {
+        None => "Asking Resolve…",
+        Some(_) => "Adding the overlays in Resolve…",
+    });
+    std::thread::spawn(move || {
+        let bridge = crate::resolve::Bridge::new(container.as_deref());
+        let result = match items {
+            None => bridge
+                .request(&serde_json::json!({"command": "status"}))
+                .map(|r| crate::resolve::describe_status(&r)),
+            Some(items) => add_overlays(&bridge, &items),
+        };
+        let _ = tx.send(Reply::Resolve(result.map_err(|e| format!("{e:#}"))));
+    });
+}
+
+fn add_overlays(
+    bridge: &crate::resolve::Bridge,
+    items: &[(String, PathBuf, PathBuf)],
+) -> anyhow::Result<String> {
+    let library = Library::open_default()?;
+    let mut requests = Vec::new();
+    for (run_id, clip, overlay) in items {
+        let first_frame = library
+            .rendered(run_id)?
+            .map(|r| r.first_frame)
+            .ok_or_else(|| anyhow::anyhow!("{run_id}'s overlay isn't recorded"))?;
+        let frames = library::probe::probe(overlay)
+            .ok()
+            .and_then(|i| i.frames)
+            .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
+        requests.push(serde_json::json!({
+            "clip": clip, "overlay": overlay, "first_frame": first_frame, "frames": frames,
+        }));
+    }
+    let reply = bridge.request(&serde_json::json!({
+        "command": "add_overlays", "items": requests,
+    }))?;
+    Ok(describe_added(&reply))
+}
+
+/// What adding overlays did, in a sentence or two.
+fn describe_added(reply: &serde_json::Value) -> String {
+    let results = reply["results"].as_array().cloned().unwrap_or_default();
+    let count = |key: &str| {
+        results
+            .iter()
+            .map(|r| r[key].as_u64().unwrap_or(0))
+            .sum::<u64>()
+    };
+    let (placed, already) = (count("placed"), count("already"));
+    let mut text = format!(
+        "Added {placed} {} to {} in {}",
+        if placed == 1 { "overlay" } else { "overlays" },
+        reply["timeline"].as_str().unwrap_or("the timeline"),
+        reply["project"].as_str().unwrap_or("Resolve"),
+    );
+    if already > 0 {
+        text.push_str(&format!(" ({already} already there)"));
+    }
+    text.push('.');
+    let notes: Vec<String> = results
+        .iter()
+        .filter_map(|r| {
+            let note = r["note"].as_str()?;
+            let name = std::path::Path::new(r["clip"].as_str().unwrap_or(""))
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
+            Some(format!("{name}: {note}"))
+        })
+        .collect();
+    if !notes.is_empty() {
+        text.push_str(&format!(" Not added: {}.", notes.join("; ")));
+    }
+    text
 }
 
 /// Starts the next queued render, if running and nothing is rendering.
@@ -603,6 +761,8 @@ fn show(p: &Page) {
         .items
         .iter()
         .any(|i| matches!(i.status, Status::Queued | Status::Stopped));
+    p.add_to_resolve
+        .set_sensitive(s.items.iter().any(|i| matches!(i.status, Status::Done(_))));
     p.start.set_visible(!rendering);
     p.start.set_sensitive(waiting);
     p.stop.set_visible(rendering);
@@ -626,4 +786,24 @@ fn button(title: &str) -> gtk::Button {
     let b = gtk::Button::with_label(title);
     b.add_css_class("ingest-action");
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn says_what_adding_to_resolve_did() {
+        let reply = json!({"ok": true, "project": "Race day", "timeline": "Edit", "results": [
+            {"clip": "/v/a.mp4", "placed": 1, "already": 0, "note": null},
+            {"clip": "/v/b.mp4", "placed": 0, "already": 1, "note": null},
+            {"clip": "/v/c.mp4", "placed": 0, "already": 0,
+             "note": "its clip isn't on the current timeline"},
+        ]});
+        assert_eq!(
+            describe_added(&reply),
+            "Added 1 overlay to Edit in Race day (1 already there). Not added: c.mp4: its clip isn't on the current timeline."
+        );
+    }
 }

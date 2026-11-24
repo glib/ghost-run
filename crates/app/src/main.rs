@@ -2,6 +2,7 @@
 
 mod library_page;
 mod output_page;
+mod resolve;
 mod runs_page;
 mod settings_dialog;
 mod shared;

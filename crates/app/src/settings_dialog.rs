@@ -98,6 +98,31 @@ pub fn open(shared: &Shared) {
         |s, v| s.overlay_folder = v,
         ("Folder", &[]),
     ));
+    let resolve = adw::PreferencesGroup::new();
+    resolve.set_title("DaVinci Resolve");
+    resolve.set_description(Some(
+        "Ghost Run reaches Resolve through its scripting API: Resolve Studio, running, with Preferences > System > General > External scripting using set to Local.",
+    ));
+    page.add(&resolve);
+    let container = adw::EntryRow::builder()
+        .title("Distrobox Resolve is in (empty: davincibox)")
+        .text(
+            shared
+                .settings()
+                .resolve_container
+                .clone()
+                .unwrap_or_default(),
+        )
+        .show_apply_button(true)
+        .build();
+    let shared2 = shared.clone();
+    container.connect_apply(move |row| {
+        let text = row.text().trim().to_owned();
+        let _ = shared2.update(|s| {
+            s.resolve_container = (!text.is_empty()).then_some(text);
+        });
+    });
+    resolve.add(&container);
     let shared2 = shared.clone();
     dialog.connect_closed(move |_| {
         for id in &subscriptions {

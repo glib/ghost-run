@@ -521,6 +521,8 @@ dependencies = [
  "libadwaita",
  "library",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "timer-core",
  "timer-render",
  "tokio",

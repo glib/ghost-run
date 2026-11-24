@@ -15,6 +15,7 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 ingest = { path = "../ingest" }
 library = { path = "../library" }
@@ -22,6 +23,9 @@ timer-core = { path = "../timer-core" }
 timer-render = { path = "../timer-render" }
 gtk = { package = "gtk4", version = "0.10", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.8", features = ["v1_5"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
