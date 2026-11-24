@@ -11,8 +11,10 @@ the video. The Python script stays usable, bug fixes only, until Rust covers the
 workflow.
 
 ## Commands
-- `python -m unittest discover -s tests` — Python tests (needs `PyYAML`, `Pillow`: `pip install -r requirements-resolve.txt`).
-- CI (`.github/workflows/ci.yml`) runs them on Python 3.10 and 3.13 on GitHub-hosted runners. CI is the gate.
+- `cargo test` — Rust tests. Before pushing: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`.
+- `cargo build -p timer-cli && scripts/parity.sh` — runs the Python and Rust CLIs on `examples/` and `tests/fixtures/` databases and fails on any difference in output or in the files they write.
+- `python -m unittest discover -s tests` — Python tests (needs `PyYAML`, `Pillow`: `pip install -r requirements-resolve.txt`). The devbox has no pip: unpack the two wheels from PyPI into a temp dir and set `PYTHONPATH` to it.
+- CI (`.github/workflows/ci.yml`, GitHub-hosted runners) runs Python 3.10 and 3.13 tests, Rust fmt/clippy/tests, and the parity check. CI is the gate.
 
 ## Shipping a change
 When asked to build something, take it through to `main` without checking in.
@@ -36,6 +38,9 @@ sensible option and list assumptions in the PR description.
 8. **Report:** PR number, merge commit, assumptions, issues filed.
 
 ## Layout
+- `crates/timer-core/` — Rust core: `models` (courses, runs), `database` (YAML v2 load/save; `yaml.rs` writes PyYAML's exact layout and quoting), `capture_time`, `markers`, `timing`, `matching` (clip → stored run; the fingerprint hash matches Python's byte for byte), `stats` (best/optimal lap), `validation`, `py` (Python-compatible coercions, `repr`, JSON escaping, half-even rounding).
+- `crates/timer-cli/` — `rtimer`: the Python CLI's database commands (`courses`, `runs`, `stats`, `validate-db`, `normalize-db`) with identical arguments and output.
+- `tests/fixtures/` — made-up databases for the parity check.
 - `src/resolve_timer/` — Python package. Resolve-free core: `timing.py`, `database.py` (YAML, schema v2), `matching.py`, `stats.py`, `markers.py`, `models.py`, `validation.py`, `service.py`, `cli.py`, `summary_card.py`. Resolve-only: `resolve_adapter.py`, `ui.py`, `ui_controller.py`, `runtime_support.py`, and the Fusion part of `overlay.py`.
 - `scripts/` — Resolve launcher and installers (Linux davincibox, Windows).
 - `tests/` — unittest; Resolve is faked, so everything runs without it.
@@ -45,6 +50,7 @@ sensible option and list assumptions in the PR description.
 
 ## Conventions
 - **The YAML database is the contract** between the Python and Rust tools: schema version 2, same field names and meaning. Never break existing databases; a schema change needs a migration and a version bump.
+- **Parity:** while both tools implement a command, `scripts/parity.sh` must stay green. Porting a command means adding it to `rtimer` and to the script. Python quirks are matched on purpose (PyYAML 1.1 quoting, `round()` half to even, `str()`/`int()`/`bool()` coercions); where Rust deliberately differs (it rejects a NaN frame rate), say so in a comment.
 - Timing is frame-based: `seconds = frame_delta / source_fps`, using the source clip's frame rate.
 - No real footage or personal databases in the repo (`timer_db.yaml` is gitignored). Test fixtures are made up or tiny generated clips.
 - **Loose ends go in GitHub issues** (`gh issue create`), referenced from the PR.

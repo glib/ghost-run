@@ -1,0 +1,118 @@
+# Made-up runs for checking the Python and Rust tools agree (scripts/parity.sh).
+schema_version: 2
+courses:
+- id: pingu
+  name: Pingu
+  sector_count: 3
+- id: on_course
+  name: 'On'
+  sector_count: 1
+- id: cafe
+  name: "Caf\xE9 Run \U0001F6B5"
+  sector_count: 2
+- id: rounding
+  name: Half-even rounding
+  sector_count: 1
+- id: empty
+  name: Empty Course
+  sector_count: 2
+runs:
+# Earliest run; ties p3 on lap time, so it must be the best lap.
+- id: p1
+  course_id: pingu
+  date: '2026-06-01'
+  filename: DJI_20260601100000_0001_D.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 5100
+    S1: 1300
+    S2: 3100
+    Start: 100
+  capture_time: '2026-06-01T17:00:00Z'
+  capture_time_source: filename_timestamp
+# Offset capture time (normalizes to 17:00Z on 06-02); fastest sector 2.
+- id: p2
+  course_id: pingu
+  date: '2026-06-02'
+  filename: GX010200.MP4
+  source_fps: 29.97
+  marker_frames:
+    Start: 50
+    S1: 670
+    S2: 1450
+    Finish: 2600
+  capture_time: '2026-06-02T10:00:00-07:00'
+  capture_time_source: manual
+# Same lap as p1, later.
+- id: p3
+  course_id: pingu
+  date: '2026-06-03'
+  filename: GX010300.MP4
+  source_fps: 59.94
+  marker_frames:
+    Start: 0
+    S1: 1150
+    S2: 3000
+    Finish: 5000
+  capture_time: 2026-06-03 09:30:00
+- id: p4_ignored
+  course_id: pingu
+  date: '2026-06-04'
+  filename: GX010400.MP4
+  source_fps: 59.94
+  ignored: true
+  marker_frames: {Start: 0, S1: 10, S2: 20, Finish: 30}
+- id: p5_uncommitted
+  course_id: pingu
+  date: '2026-06-04'
+  filename: GX010500.MP4
+  source_fps: 59.94
+  committed: false
+  marker_frames: {Start: 0, S1: 10, S2: 20, Finish: 30}
+# Missing S2: not counted.
+- id: p6_invalid
+  course_id: pingu
+  date: '2026-06-05'
+  filename: GX010600.MP4
+  source_fps: 59.94
+  marker_frames: {Start: 0, S1: 10, Finish: 30}
+# Date only, no fingerprint (normalize-db fills it), extra fields kept.
+- id: p7
+  course_id: pingu
+  date: 2026-05-20
+  filename: GX010700.MP4
+  source_fps: 25
+  marker_frames:
+    Start: 10
+    S1: 400
+    S2: 1200
+    Finish: 2300
+  clip_id: clip-7
+  source_path: /media/runs/GX010700.MP4
+  committed_at: '2026-05-21T08:00:00Z'
+  metadata:
+    weather: wet
+    notes: "first run, \"slow\""
+    tags: [practice, '2026']
+- id: on1
+  course_id: on_course
+  date: '2026-06-06'
+  filename: 'yes'
+  source_fps: 30.0
+  marker_frames: {Start: 30, Finish: 930}
+  fingerprint: stale-fingerprint
+- id: cafe1
+  course_id: cafe
+  date: '2026-06-07'
+  filename: "GX01 Caf\xE9.MP4"
+  source_fps: 23.976
+  marker_frames: {Start: 0, S1: 500, Finish: 1201}
+# 1 frame at 16 fps = 62.5 ms: Python rounds half to even, 0:00.062.
+- id: round1
+  course_id: rounding
+  date: '2026-06-08'
+  filename: GX010800.MP4
+  source_fps: 16
+  marker_frames: {Start: 0, Finish: 1}

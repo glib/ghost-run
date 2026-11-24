@@ -13,3 +13,6 @@ resolve_timer.log
 resolve_timer_preferences.json
 resolve_timer_startup.json
 timer_db.yaml
+
+# Rust
+/target/

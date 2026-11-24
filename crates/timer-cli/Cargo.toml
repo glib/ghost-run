@@ -1,0 +1,21 @@
+[package]
+name = "timer-cli"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Command-line interface to the run database"
+
+[[bin]]
+name = "rtimer"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+timer-core = { path = "../timer-core" }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

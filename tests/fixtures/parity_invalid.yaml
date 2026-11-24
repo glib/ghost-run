@@ -1,0 +1,68 @@
+# Made-up database with consistency errors (scripts/parity.sh compares validate-db).
+schema_version: 2
+courses:
+- id: course
+  name: Course
+  sector_count: 2
+- id: course
+  name: Duplicate
+  sector_count: 2
+- id: ''
+  name: Blank ID
+  sector_count: 2
+- id: blank_name
+  name: ' '
+  sector_count: 2
+- id: zero
+  name: Zero sectors
+  sector_count: 0
+runs:
+- id: run_a
+  course_id: course
+  date: '2026-05-31'
+  filename: A.MP4
+  source_fps: 100.0
+  marker_frames: {Start: 0, S1: 100, Finish: 300}
+- id: run_a
+  course_id: course
+  date: '2026-05-31'
+  filename: A.MP4
+  source_fps: 100.0
+  marker_frames: {Start: 0, Finish: 100}
+- id: missing_course
+  course_id: missing
+  date: '2026-05-31'
+  filename: B.MP4
+  source_fps: 100.0
+  marker_frames: {Start: 0, S1: 100, Finish: 300}
+- id: bad_fps
+  course_id: course
+  date: '2026-05-31'
+  filename: C.MP4
+  source_fps: 0
+  marker_frames: {Start: 0, S1: 100, Finish: 300}
+- id: bad_source
+  course_id: course
+  date: '2026-05-31'
+  filename: D.MP4
+  source_fps: 50
+  capture_time_source: guess
+  marker_frames: {Start: 0, S1: 100, Finish: 300}
+- id: out_of_order
+  course_id: course
+  date: '2026-05-31'
+  filename: E.MP4
+  source_fps: 50
+  marker_frames: {Start: 0, S1: 400, Finish: 300}
+- id: extras
+  course_id: course
+  date: '2026-05-31'
+  filename: F.MP4
+  source_fps: 50
+  marker_frames: {Start: 0, S1: 10, S3: 20, S10: 25, Lunch: 26, Finish: 30}
+- id: zero_sectors
+  course_id: zero
+  date: '2026-05-31'
+  filename: G.MP4
+  source_fps: 50
+  marker_frames: {Start: 0, Finish: 30}
