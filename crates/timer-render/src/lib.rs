@@ -161,6 +161,7 @@ pub struct FrameRenderer {
     /// The empty panel, premultiplied RGBA (0–1), panel-sized.
     background: Vec<[f32; 4]>,
     work: Vec<[f32; 4]>,
+    panel_buffer: Vec<u8>,
 }
 
 impl FrameRenderer {
@@ -176,6 +177,7 @@ impl FrameRenderer {
             glyphs: HashMap::new(),
             background,
             work,
+            panel_buffer: Vec::new(),
         }
     }
 
@@ -188,16 +190,35 @@ impl FrameRenderer {
         vec![0; self.layout.width as usize * self.layout.height as usize * 4]
     }
 
-    /// Draws clip frame `frame` into `out` (a frame from [`Self::blank_frame`],
-    /// reused between calls: pixels outside the panel are left as they are).
+    /// A transparent panel-sized buffer, for [`Self::render_panel`].
+    pub fn blank_panel(&self) -> Vec<u8> {
+        let (_, _, pw, ph) = self.layout.panel;
+        vec![0; pw as usize * ph as usize * 4]
+    }
+
+    /// Draws clip frame `frame` into `out`, a whole frame from
+    /// [`Self::blank_frame`] (pixels outside the panel are left as they are).
     pub fn render(&mut self, frame: i64, out: &mut [u8]) {
         let (px, py, pw, ph) = self.layout.panel;
         let stride = self.layout.width as usize * 4;
+        let row_bytes = pw as usize * 4;
+        let mut panel = std::mem::take(&mut self.panel_buffer);
+        panel.resize(row_bytes * ph as usize, 0);
+        self.render_panel(frame, &mut panel);
+        for row in 0..ph as usize {
+            let start = (py as usize + row) * stride + px as usize * 4;
+            out[start..start + row_bytes]
+                .copy_from_slice(&panel[row * row_bytes..(row + 1) * row_bytes]);
+        }
+        self.panel_buffer = panel;
+    }
+
+    /// Draws just the panel's pixels of clip frame `frame` into `out` (from
+    /// [`Self::blank_panel`]); the rest of every frame is transparent, so the
+    /// encoder can pad the panel out to the full frame itself.
+    pub fn render_panel(&mut self, frame: i64, out: &mut [u8]) {
         if frame < self.layout.start_frame {
-            for row in 0..ph as usize {
-                let start = (py as usize + row) * stride + px as usize * 4;
-                out[start..start + pw as usize * 4].fill(0);
-            }
+            out.fill(0);
             return;
         }
         self.work.copy_from_slice(&self.background);
@@ -216,13 +237,8 @@ impl FrameRenderer {
             let text = label.text.as_deref().unwrap_or(&live);
             self.draw_text(text, label);
         }
-        for row in 0..ph as usize {
-            let start = (py as usize + row) * stride + px as usize * 4;
-            let dst = &mut out[start..start + pw as usize * 4];
-            let src = &self.work[row * pw as usize..(row + 1) * pw as usize];
-            for (d, s) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src) {
-                *d = unpremultiply(*s);
-            }
+        for (d, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(&self.work) {
+            *d = unpremultiply(*s);
         }
     }
 
@@ -398,6 +414,25 @@ mod tests {
         // Going back to before the start clears the panel again.
         r.render(0, &mut frame);
         assert!(frame.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn panel_only_frames_match_the_full_frame() {
+        let mut r = FrameRenderer::new(payload(), 640, 360);
+        let (px, py, pw, ph) = r.layout().panel;
+        let (mut full, mut panel) = (r.blank_frame(), r.blank_panel());
+        for n in [0, 150, 250, 400] {
+            r.render(n, &mut full);
+            r.render_panel(n, &mut panel);
+            for row in 0..ph as usize {
+                let start = ((py as usize + row) * 640 + px as usize) * 4;
+                assert_eq!(
+                    &full[start..start + pw as usize * 4],
+                    &panel[row * pw as usize * 4..(row + 1) * pw as usize * 4],
+                    "frame {n}, row {row}"
+                );
+            }
+        }
     }
 
     #[test]

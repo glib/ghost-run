@@ -172,7 +172,9 @@ target\release\rtimer --db timer_db.yaml render --course lower_whistler_a_line -
 - It looks like the Fusion overlay, except the panel can't blur the video behind
   it, so it's a plain translucent panel.
 - ProRes 4444 at 4K is large: about 1.2 GB a minute. On a 4-core machine,
-  encoding runs at about 15 frames a second.
+  encoding runs at about 19 frames a second. The encoder uses a thread per core,
+  but only as many as fit in half the free memory (each takes about 230 MB at
+  4K); `--threads N` overrides that.
 
 Runs store `capture_time` so comparisons are chronological by source clip capture
 time. DJI filenames containing `YYYYMMDDHHMMSS` are the primary source because

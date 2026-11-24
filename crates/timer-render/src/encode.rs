@@ -140,6 +140,35 @@ fn drop_count(rate: FrameRate) -> i64 {
     i64::from(rate.nominal()) / 15 // 2 at 29.97, 4 at 59.94
 }
 
+/// Encoder threads for `width × height` ProRes: one per core, but no more
+/// than fit in half the memory available. Each thread holds a few full frames
+/// (at 4K about 230 MB a thread, plus about 600 MB for ffmpeg's queues), so
+/// threads, not speed, are what can run a machine out of memory.
+pub fn encoder_threads(width: u32, height: u32) -> usize {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    match available_memory() {
+        Some(bytes) => threads_for_memory(width, height, bytes, cores),
+        None => cores,
+    }
+}
+
+fn threads_for_memory(width: u32, height: u32, available: u64, cores: usize) -> usize {
+    // A 10-bit 4:4:4 frame with alpha, as the encoder holds it.
+    let frame = u64::from(width) * u64::from(height) * 8;
+    let (base, per_thread) = (frame * 9, frame * 7 / 2);
+    let budget = available / 2;
+    let fit = budget.saturating_sub(base) / per_thread.max(1);
+    (fit as usize).clamp(1, cores.max(1))
+}
+
+/// `MemAvailable` from `/proc/meminfo` (Linux), in bytes.
+fn available_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 /// What the overlay needs to know about the clip it goes over.
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
@@ -199,45 +228,68 @@ pub struct Encoder {
     frame_bytes: usize,
 }
 
+/// Where and how [`Encoder`] writes.
+#[derive(Debug, Clone)]
+pub struct Output<'a> {
+    pub path: &'a Path,
+    /// The video's frame size.
+    pub width: u32,
+    pub height: u32,
+    /// Where the frames written go in it (x, y, width, height); the rest of
+    /// each frame is transparent. Sending only the part that changes keeps
+    /// the pipe, colour conversion and memory small.
+    pub region: (u32, u32, u32, u32),
+    pub rate: FrameRate,
+    /// The first frame's timecode, in a `.mov`.
+    pub timecode: Option<&'a str>,
+    /// The first frame's number, in an image sequence (`frame_%05d.png`).
+    pub first: i64,
+    /// Encoder threads (see [`encoder_threads`]).
+    pub threads: usize,
+}
+
 impl Encoder {
-    /// Starts writing `path`: ProRes 4444 with alpha for `.mov`, else
-    /// whatever ffmpeg picks for the extension (e.g. `frame_%05d.png`). The
-    /// first frame gets `timecode` in a `.mov`, number `first` in a sequence.
-    pub fn start(
-        path: &Path,
-        width: u32,
-        height: u32,
-        rate: FrameRate,
-        timecode: Option<&str>,
-        first: i64,
-    ) -> Result<Self, EncodeError> {
+    /// Starts writing: ProRes 4444 with alpha for `.mov`, else whatever ffmpeg
+    /// picks for the extension (e.g. `frame_%05d.png`).
+    pub fn start(out: &Output<'_>) -> Result<Self, EncodeError> {
+        let (x, y, w, h) = out.region;
+        let is_mov = out
+            .path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mov"));
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
-            .args(["-s", &format!("{width}x{height}")])
-            .args(["-framerate", &rate.arg(), "-i", "-"]);
-        let is_mov = path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mov"));
+            .args(["-s", &format!("{w}x{h}")])
+            .args(["-framerate", &out.rate.arg(), "-i", "-"]);
+        let mut filters = Vec::new();
+        if is_mov {
+            // Convert only the region, before padding it out.
+            filters.push("format=yuva444p10le".to_owned());
+        }
+        if (w, h) != (out.width, out.height) {
+            filters.push(format!(
+                "pad={}:{}:{x}:{y}:color=black@0",
+                out.width, out.height
+            ));
+        }
+        if !filters.is_empty() {
+            cmd.args(["-vf", &filters.join(",")]);
+        }
         if is_mov {
             // ProRes 4444 (profile 4, `ap4h`) keeps the alpha. prores_aw is
             // about 4x faster than prores_ks at 4K, for the same size.
-            cmd.args(["-c:v", "prores_aw", "-profile:v", "4"]).args([
-                "-pix_fmt",
-                "yuva444p10le",
-                "-vendor",
-                "apl0",
-            ]);
-        }
-        if is_mov {
-            if let Some(tc) = timecode {
+            cmd.args(["-c:v", "prores_aw", "-profile:v", "4"])
+                .args(["-pix_fmt", "yuva444p10le", "-vendor", "apl0"])
+                .args(["-threads", &out.threads.max(1).to_string()]);
+            if let Some(tc) = out.timecode {
                 cmd.args(["-timecode", tc]);
             }
-        } else if path.to_string_lossy().contains('%') {
-            cmd.args(["-start_number", &first.to_string()]);
+        } else if out.path.to_string_lossy().contains('%') {
+            cmd.args(["-start_number", &out.first.to_string()]);
         }
         let mut child = cmd
-            .arg(path)
+            .arg(out.path)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -249,7 +301,7 @@ impl Encoder {
         Ok(Self {
             child: Some(child),
             stdin,
-            frame_bytes: width as usize * height as usize * 4,
+            frame_bytes: w as usize * h as usize * 4,
         })
     }
 
@@ -318,6 +370,17 @@ mod tests {
             Some(FrameRate::from_fps(59.94))
         );
         assert_eq!(FrameRate::parse("0/0"), None);
+    }
+
+    #[test]
+    fn threads_fit_in_half_the_memory() {
+        let gb = 1024 * 1024 * 1024;
+        // 4K: ~600 MB base + ~230 MB a thread, within half of what's free.
+        assert_eq!(threads_for_memory(3840, 2160, 8 * gb, 16), 15);
+        assert_eq!(threads_for_memory(3840, 2160, 8 * gb, 4), 4);
+        assert_eq!(threads_for_memory(3840, 2160, 2 * gb, 16), 2);
+        assert_eq!(threads_for_memory(3840, 2160, gb, 16), 1);
+        assert_eq!(threads_for_memory(1920, 1080, 4 * gb, 16), 16);
     }
 
     #[test]

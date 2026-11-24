@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::Args;
 use timer_core::overlay::OverlayPayload;
 use timer_render::FrameRenderer;
-use timer_render::encode::{Encoder, FrameRate, Timecode, probe};
+use timer_render::encode::{Encoder, FrameRate, Output, Timecode, encoder_threads, probe};
 
 #[derive(Args)]
 pub struct RenderArgs {
@@ -29,6 +29,9 @@ pub struct RenderArgs {
     /// Write only this clip frame, as an image
     #[arg(long)]
     still: Option<i64>,
+    /// Encoder threads (default: one per core, as many as fit in half the free memory)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    threads: Option<u32>,
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
@@ -59,12 +62,25 @@ pub fn render(
     let fps = payload.source_fps;
     let (start, finish) = (payload.start_frame, payload.finish_frame);
     let mut renderer = FrameRenderer::new(payload, width, height);
-    let mut frame = renderer.blank_frame();
+    let mut panel = renderer.blank_panel();
+    let threads = args
+        .threads
+        .map_or_else(|| encoder_threads(width, height), |t| t as usize);
+    let output = |timecode, first| Output {
+        path: &args.out,
+        width,
+        height,
+        region: renderer.layout().panel,
+        rate,
+        timecode,
+        first,
+        threads,
+    };
 
     if let Some(n) = args.still {
-        renderer.render(n, &mut frame);
-        let mut encoder = Encoder::start(&args.out, width, height, rate, None, n)?;
-        encoder.write_frame(&frame)?;
+        let mut encoder = Encoder::start(&output(None, n))?;
+        renderer.render_panel(n, &mut panel);
+        encoder.write_frame(&panel)?;
         encoder.finish()?;
         println!("Wrote {} (clip frame {n})", args.out.display());
         return Ok(());
@@ -85,16 +101,16 @@ pub fn render(
     let timecode = source_tc.plus(first).format(rate);
 
     let began = Instant::now();
-    let mut encoder = Encoder::start(&args.out, width, height, rate, Some(&timecode), first)?;
+    let mut encoder = Encoder::start(&output(Some(&timecode), first))?;
     for n in first..=last {
-        renderer.render(n, &mut frame);
-        encoder.write_frame(&frame)?;
+        renderer.render_panel(n, &mut panel);
+        encoder.write_frame(&panel)?;
     }
     encoder.finish()?;
     let count = last - first + 1;
     let secs = began.elapsed().as_secs_f64();
     println!(
-        "Wrote {}: {count} frames ({width}x{height}, {:.3} fps) in {secs:.1} s ({:.0} frames/s)",
+        "Wrote {}: {count} frames ({width}x{height}, {:.3} fps) in {secs:.1} s ({:.0} frames/s, {threads} encoder threads)",
         args.out.display(),
         rate.fps(),
         count as f64 / secs.max(1e-9),
