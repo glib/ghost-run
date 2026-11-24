@@ -84,10 +84,21 @@ pub fn footage(clip: &Clip) -> PathBuf {
 
 /// The library clip a stored run was timed on: its source path if that's
 /// still there, else a clip with the run's file name.
+///
+/// Paths are also compared after resolving links: on Fedora Atomic `/home`
+/// links to `/var/home`, so a run timed at `/home/…/clip.mov` is the library's
+/// `/var/home/…/clip.mov`, and its proxy should be used.
 pub fn run_clip(run: &RunRecord, clips: &[Clip]) -> Option<Clip> {
     if let Some(path) = run.source_path.as_deref().filter(|p| !p.is_empty()) {
         let path = Path::new(path);
         if let Some(clip) = clips.iter().find(|c| c.path == path) {
+            return Some(clip.clone());
+        }
+        if let Ok(real) = path.canonicalize()
+            && let Some(clip) = clips
+                .iter()
+                .find(|c| c.path.canonicalize().is_ok_and(|p| p == real))
+        {
             return Some(clip.clone());
         }
         if path.is_file() {
@@ -231,6 +242,43 @@ pub fn cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clip_at(path: &Path) -> Clip {
+        Clip {
+            path: path.to_owned(),
+            size: 1,
+            modified_ns: 1,
+            recorded: None,
+            recorded_source: String::new(),
+            info: None,
+            probe_error: None,
+            proxy: ProxyState::Ready(path.with_extension("proxy.mov")),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_timed_through_a_linked_folder_finds_the_library_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("var-home");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.mov"), b"x").unwrap();
+        let link = dir.path().join("home");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut run = RunRecord::new(
+            "r",
+            "c",
+            "2026-01-01",
+            "other.mov",
+            30.0,
+            MarkerFrames::new(),
+        );
+        run.source_path = Some(link.join("a.mov").display().to_string());
+        let clips = [clip_at(&real.join("b.mov")), clip_at(&real.join("a.mov"))];
+        let found = run_clip(&run, &clips).unwrap();
+        assert_eq!(found, clips[1]);
+        assert_eq!(footage(&found), real.join("a.proxy.mov"));
+    }
 
     #[test]
     fn markers_to_check_are_listed_in_course_order() {

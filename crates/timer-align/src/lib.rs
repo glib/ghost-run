@@ -255,23 +255,52 @@ fn normalize(v: &mut [f32]) {
 /// `r` with a stretch of `q` is weighted by `len(r) + len(stretch)`, and the
 /// best stretch is the one with the lowest cost per unit of weight.
 ///
+/// The lowest *mean* is found exactly (Dinkelbach's method): one pass finds
+/// the path with the lowest total of `cost − λ` per unit of weight, λ becomes
+/// that path's mean, and passes repeat until no path beats it. Keeping only
+/// the lowest *total* into each cell instead favours paths squeezed through
+/// the fewest clip samples, so a rider stopping mid-run once made the whole
+/// first half of a run be skipped (#27).
+///
 /// Returns the path as (r index, q index) cells, and the mean cost along it.
 fn subsequence_dtw(r: &Descriptors, q: &Descriptors) -> (Vec<(usize, usize)>, f64) {
     let (n, m) = (r.len(), q.len());
+    let mut local = vec![0f32; n * m];
+    for i in 0..n {
+        for j in 0..m {
+            local[i * m + j] = r.distance(i, q, j);
+        }
+    }
+    let mut lambda = 0.0f32;
+    let mut best: Option<(Vec<(usize, usize)>, f64)> = None;
+    for _ in 0..MAX_PASSES {
+        let (path, mean) = dtw_pass(&local, n, m, lambda);
+        if best.as_ref().is_some_and(|(_, b)| mean >= b - 1e-6) {
+            break;
+        }
+        lambda = mean as f32;
+        best = Some((path, mean));
+    }
+    best.expect("one pass runs")
+}
+
+/// Passes of [`subsequence_dtw`] at most; it usually settles in three or four.
+const MAX_PASSES: usize = 12;
+
+/// One pass of [`subsequence_dtw`]: the path with the lowest total of
+/// `local − lambda` over its weight, with its mean `local`.
+fn dtw_pass(local: &[f32], n: usize, m: usize, lambda: f32) -> (Vec<(usize, usize)>, f64) {
     let k = MAX_SLOPE;
+    let d = |i: usize, j: usize| local[i * m + j] - lambda;
     // Steps: 0 = start of the path (row 0); 1..=k: (1, s); k+1..=2k-1: (s, 1) for s in 2..=k.
     let mut back = vec![0u8; n * m];
-    // Rolling rows (the last k + 1) of the cost so far, the path's start column and the local costs.
+    // Rolling rows (the last k + 1) of the cost so far and the path's start column.
     let mut cost = vec![vec![f32::INFINITY; m]; k + 1];
     let mut start = vec![vec![0u32; m]; k + 1];
-    let mut local = vec![vec![0f32; m]; k + 1];
     for i in 0..n {
         let row = i % (k + 1);
-        for (j, cell) in local[row].iter_mut().enumerate() {
-            *cell = r.distance(i, q, j);
-        }
         for j in 0..m {
-            let here = local[row][j];
+            let here = d(i, j);
             if i == 0 {
                 cost[row][j] = 2.0 * here;
                 start[row][j] = j as u32;
@@ -284,7 +313,7 @@ fn subsequence_dtw(r: &Descriptors, q: &Descriptors) -> (Vec<(usize, usize)>, f6
                 if j < s {
                     break;
                 }
-                let skipped: f32 = (1..s).map(|t| local[row][j - t]).sum();
+                let skipped: f32 = (1..s).map(|t| d(i, j - t)).sum();
                 let c = cost[prev][j - s] + skipped + 2.0 * here;
                 if c < best.0 {
                     best = (c, s as u8, start[prev][j - s]);
@@ -296,7 +325,7 @@ fn subsequence_dtw(r: &Descriptors, q: &Descriptors) -> (Vec<(usize, usize)>, f6
                     break;
                 }
                 let from = (i - s) % (k + 1);
-                let skipped: f32 = (1..s).map(|t| local[(i - t) % (k + 1)][j]).sum();
+                let skipped: f32 = (1..s).map(|t| d(i - t, j)).sum();
                 let c = cost[from][j - 1] + skipped + 2.0 * here;
                 if c < best.0 {
                     best = (c, (k + s - 1) as u8, start[from][j - 1]);
@@ -310,14 +339,17 @@ fn subsequence_dtw(r: &Descriptors, q: &Descriptors) -> (Vec<(usize, usize)>, f6
 
     let last = (n - 1) % (k + 1);
     let weight = |j: usize| (2 + (n - 1) + (j - start[last][j] as usize)) as f64;
+    // Lowest total of `local − lambda`; with lambda = 0 (the first pass),
+    // the lowest mean of the paths found.
+    let score = |j: usize| {
+        let c = f64::from(cost[last][j]);
+        if lambda == 0.0 { c / weight(j) } else { c }
+    };
     let end = (0..m)
         .filter(|&j| cost[last][j].is_finite())
-        .min_by(|&a, &b| {
-            (f64::from(cost[last][a]) / weight(a))
-                .total_cmp(&(f64::from(cost[last][b]) / weight(b)))
-        })
+        .min_by(|&a, &b| score(a).total_cmp(&score(b)))
         .expect("a path exists (clip checked long enough)");
-    let mean = f64::from(cost[last][end]) / weight(end);
+    let mean = f64::from(cost[last][end]) / weight(end) + f64::from(lambda);
 
     let mut path = Vec::new();
     let (mut i, mut j) = (n - 1, end);
@@ -574,6 +606,60 @@ mod tests {
                 placed.confidence
             );
         }
+    }
+
+    /// The new rider stops mid-run for 11 s, looking down at the bike (a
+    /// view that matches nothing in the reference). Keeping the cheapest
+    /// *total* path into each cell once made the aligner skip everything
+    /// before the stop, squeezing the whole run into what came after (#27).
+    #[test]
+    fn places_markers_around_a_long_stop_mid_run() {
+        let world = world(WORLD_W, WORLD_H, 7);
+        let elsewhere = world_at(99);
+        let gates = [
+            ("Start", 300.0),
+            ("S1", 800.0),
+            ("S2", 1500.0),
+            ("Finish", 2000.0),
+        ];
+        let fps = 30.0;
+        let ref_pos = ride(fps, 100.0, 2200.0, 2.0, 2.0, |_| 60.0);
+        let reference = film(&world, &ref_pos, 12.0, (1.0, 40.0, 4.0), fps);
+        let markers: Vec<(String, i64)> = gates
+            .iter()
+            .map(|(n, x)| ((*n).to_owned(), crossing(&ref_pos, *x)))
+            .collect();
+
+        // The same ride, but stopped at 1200 for 11 s.
+        let before = ride(fps, 50.0, 1200.0, 6.0, 0.0, |_| 60.0);
+        let after = ride(fps, 1200.0, 2250.0, 0.0, 4.0, |_| 60.0);
+        let stop = (11.0 * fps) as usize;
+        let mut clip = film(&world, &before, 14.0, (0.9, 30.0, 6.0), fps);
+        let still = film(&elsewhere, &vec![500.0; stop], 20.0, (1.0, 40.0, 6.0), fps);
+        clip.data.extend_from_slice(&still.data);
+        let rest = film(&world, &after, 14.0, (0.9, 30.0, 6.0), fps);
+        clip.data.extend_from_slice(&rest.data);
+        let truth = |x: f64| {
+            if x < 1200.0 {
+                crossing(&before, x)
+            } else {
+                (before.len() + stop) as i64 + crossing(&after, x)
+            }
+        };
+
+        let result = align(&reference, &markers, &clip).unwrap();
+        for (placed, (name, x)) in result.markers.iter().zip(gates) {
+            assert!(
+                (placed.frame - truth(x)).abs() <= 2,
+                "{name}: placed at {}, true {}",
+                placed.frame,
+                truth(x)
+            );
+        }
+    }
+
+    fn world_at(seed: u64) -> Vec<f32> {
+        world(WORLD_W, WORLD_H, seed)
     }
 
     #[test]

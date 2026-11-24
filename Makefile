@@ -25,9 +25,11 @@ check:
 install: build
 	install -Dm755 target/release/ghost-run $(DESTDIR)$(BIN)
 	install -Dm755 target/release/rtimer $(DESTDIR)$(PREFIX)/bin/rtimer
+	# The icon first: the desktop notices a new launcher at once and looks up
+	# its icon, and KDE remembers a miss for a while.
+	install -Dm644 packaging/$(APP_ID).svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
 	install -d $(DESTDIR)$(PREFIX)/share/applications
 	sed 's|@EXEC@|$(EXEC)|' packaging/$(APP_ID).desktop > $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
-	install -Dm644 packaging/$(APP_ID).svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
 	@$(if $(DESTDIR),true,sh packaging/refresh-menus.sh $(PREFIX)/share/applications $(PREFIX)/share/icons)
 	@echo "Installed. Launcher runs: $(EXEC)"
 
