@@ -637,47 +637,11 @@ fn ask(
 
 fn move_dialog(p: &Page) {
     let ids = selected(p);
-    let s = p.state.borrow();
-    let Some(db) = &s.db else { return };
-    let current = s.course.clone();
-    let others: Vec<(String, String)> = db
-        .courses
-        .iter()
-        .filter(|c| Some(&c.id) != current.as_ref())
-        .map(|c| {
-            (
-                c.id.clone(),
-                format!("{} ({} sectors)", c.name, c.sector_count),
-            )
-        })
-        .collect();
-    drop(s);
-    if others.is_empty() {
-        p.status
-            .set_text("There's no other course to move them to: add one with New course….");
-        return;
-    }
-    let names: Vec<&str> = others.iter().map(|(_, n)| n.as_str()).collect();
-    let choice = gtk::DropDown::from_strings(&names);
+    let from = p.state.borrow().course.clone();
     let p2 = p.clone();
-    let choice2 = choice.clone();
-    ask(
-        p,
-        &format!("Move {}?", count(ids.len())),
-        "Their markers stay as they are, so the course must have the same number of sectors.",
-        "Move",
-        false,
-        Some(choice.upcast_ref()),
-        move || {
-            let (id, name) = others[choice2.selected() as usize].clone();
-            let ids = ids.clone();
-            apply(
-                &p2,
-                &format!("Moved {} to {name}.", count(ids.len())),
-                |db| edit::move_runs(db, &ids, &id),
-            );
-        },
-    );
+    crate::courses::move_runs(&p.shared, ids, from.as_deref(), move |result| {
+        p2.status.set_text(&result.unwrap_or_else(|e| e));
+    });
 }
 
 fn delete_dialog(p: &Page) {
@@ -703,45 +667,15 @@ fn delete_dialog(p: &Page) {
 }
 
 fn new_course_dialog(p: &Page) {
-    if p.state.borrow().db.is_none() {
-        p.status.set_text("Choose or create a run database first.");
-        return;
-    }
-    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    let name = gtk::Entry::builder()
-        .placeholder_text("Name, e.g. Lower Whistler A-Line")
-        .build();
-    let sectors_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    sectors_row.append(&label("Sectors", ""));
-    let sectors = gtk::SpinButton::with_range(1.0, 20.0, 1.0);
-    sectors.set_value(3.0);
-    sectors_row.append(&sectors);
-    form.append(&name);
-    form.append(&sectors_row);
     let p2 = p.clone();
-    let (name2, sectors2) = (name.clone(), sectors.clone());
-    ask(
-        p,
-        "New course",
-        "Sectors are the timed parts between Start, S1, S2… and Finish: 3 sectors means markers Start, S1, S2, Finish.",
-        "Add",
-        false,
-        Some(form.upcast_ref()),
-        move || {
-            let text = name2.text().to_string();
-            let n = sectors2.value() as i64;
-            let added: Rc<RefCell<Option<String>>> = Rc::default();
-            let added2 = added.clone();
-            apply(&p2, &format!("Added {text}."), move |db| {
-                *added2.borrow_mut() = Some(edit::add_course(db, &text, n)?);
-                Ok(())
-            });
-            if let Some(id) = added.borrow().clone() {
-                p2.state.borrow_mut().course = Some(id);
-                show(&p2);
-            }
-        },
-    );
+    crate::courses::new_course(&p.shared, move |result| match result {
+        Ok((id, text)) => {
+            p2.state.borrow_mut().course = Some(id);
+            show(&p2);
+            p2.status.set_text(&text);
+        }
+        Err(e) => p2.status.set_text(&e),
+    });
 }
 
 fn rename_dialog(p: &Page) {
@@ -755,27 +689,10 @@ fn rename_dialog(p: &Page) {
         return;
     };
     drop(s);
-    let entry = gtk::Entry::builder().text(&course.name).build();
     let p2 = p.clone();
-    let entry2 = entry.clone();
-    ask(
-        p,
-        "Rename course",
-        &format!(
-            "Its id ({}) stays the same, so runs and overlays keep pointing at it.",
-            course.id
-        ),
-        "Rename",
-        false,
-        Some(entry.upcast_ref()),
-        move || {
-            let name = entry2.text().to_string();
-            let id = course.id.clone();
-            apply(&p2, &format!("Renamed to {name}."), |db| {
-                edit::rename_course(db, &id, &name)
-            });
-        },
-    );
+    crate::courses::rename_course(&p.shared, &course.id, &course.name, move |result| {
+        p2.status.set_text(&result.unwrap_or_else(|e| e));
+    });
 }
 
 fn label(text: &str, class: &str) -> gtk::Label {
