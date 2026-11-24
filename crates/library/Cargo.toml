@@ -1,0 +1,23 @@
+[package]
+name = "library"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+description = "Ghost Run's footage library: clips found in your folders, and their proxies"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+libc = "0.2"
+regex.workspace = true
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json.workspace = true
+toml = "0.9"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

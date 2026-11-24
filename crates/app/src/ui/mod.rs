@@ -111,7 +111,7 @@ pub fn run(demo: bool) {
         .application_id("io.github.glib.GhostRun")
         .build();
     app.connect_activate(move |app| build(app, demo));
-    app.run_with_args(&["resolve-ingest"]);
+    app.run_with_args(&["ghost-run"]);
 }
 fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, events: Events, cancel: Cancel) {
     std::thread::spawn(move || {
@@ -221,7 +221,7 @@ fn build(app: &adw::Application, demo: bool) {
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Ghost Run", "Import")));
+    header.set_title_widget(Some(&adw::WindowTitle::new("Import", "")));
     let history = action_button("History");
     let settings_button = action_button("Settings");
     header.pack_end(&settings_button);
@@ -526,7 +526,7 @@ fn build(app: &adw::Application, demo: bool) {
             refresh_rows(&v);
         });
     }
-    window.set_content(Some(&root));
+    window.set_content(Some(&crate::shell::shell(&window, root.upcast())));
     {
         let v = view.clone();
         settings_button.connect_clicked(move |_| settings_dialog(&v));
