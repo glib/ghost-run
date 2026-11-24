@@ -9,6 +9,9 @@ Requests:
   {"command": "status"}
   {"command": "add_overlays", "items": [
       {"clip": path, "overlay": path, "first_frame": n, "frames": n}, ...]}
+  {"command": "new_project", "name": text, "fps": "29.97", "width": n, "height": n,
+   "runs": [{"clip": path, "proxy": path or null, "overlay": path or null,
+             "first_frame": n, "frames": n}, ...]}
 
 Replies are {"ok": true, ...} or {"ok": false, "error": code, "message": text}.
 
@@ -22,6 +25,7 @@ import os
 import sys
 
 BIN_NAME = "Ghost Run overlays"
+CLIPS_BIN = "Ghost Run clips"
 
 
 class BridgeError(Exception):
@@ -142,12 +146,12 @@ def item_path(item):
     return mpi.GetClipProperty("File Path") if mpi else None
 
 
-def overlay_bin(media_pool):
+def overlay_bin(media_pool, name=BIN_NAME):
     root = media_pool.GetRootFolder()
     for folder in root.GetSubFolderList() or []:
-        if folder.GetName() == BIN_NAME:
+        if folder.GetName() == name:
             return folder
-    return media_pool.AddSubFolder(root, BIN_NAME)
+    return media_pool.AddSubFolder(root, name)
 
 
 def import_overlay(media_pool, folder, path):
@@ -230,14 +234,98 @@ def add_overlays(resolve, items):
             "results": results}
 
 
+def unused_name(taken, name):
+    """`name`, or `name 2`, `name 3`... if Resolve has a project called that."""
+    if name not in taken:
+        return name
+    n = 2
+    while "%s %d" % (name, n) in taken:
+        n += 1
+    return "%s %d" % (name, n)
+
+
+def new_project(resolve, request):
+    """A new project with the runs back to back: each run's clip on V1 (with
+    its audio), from a second before Start to the end of its overlay, and the
+    overlay above it on V2; proxies linked."""
+    runs = request.get("runs", [])
+    if not runs:
+        raise BridgeError("bad_request", "no runs to put in the project")
+    pm = resolve.GetProjectManager()
+    taken = set(pm.GetProjectListInCurrentFolder() or [])
+    name = unused_name(taken, request.get("name") or "Ghost Run")
+    project = pm.CreateProject(name)
+    if not project:
+        raise BridgeError("create_failed", "Resolve couldn't create a project called %s" % name)
+    # The timeline's rate can only be set before any media is in the project.
+    project.SetSetting("timelineFrameRate", str(request.get("fps", "29.97")))
+    if request.get("width") and request.get("height"):
+        project.SetSetting("timelineResolutionWidth", str(request["width"]))
+        project.SetSetting("timelineResolutionHeight", str(request["height"]))
+    media_pool = project.GetMediaPool()
+    clips_bin = overlay_bin(media_pool, CLIPS_BIN)
+    overlays_bin = overlay_bin(media_pool)
+    timeline = media_pool.CreateEmptyTimeline(name)
+    if not timeline:
+        raise BridgeError("create_failed", "Resolve couldn't create the timeline")
+    project.SetCurrentTimeline(timeline)
+    while int(timeline.GetTrackCount("video")) < 2:
+        timeline.AddTrack("video")
+
+    notes = []
+    placed = 0
+    record = int(timeline.GetStartFrame())
+    for run in runs:
+        clip_name = os.path.basename(run["clip"])
+        if not os.path.isfile(run["clip"]):
+            notes.append("%s: the clip is missing" % clip_name)
+            continue
+        clip = import_overlay(media_pool, clips_bin, run["clip"])
+        if run.get("proxy") and os.path.isfile(run["proxy"]):
+            if not clip.LinkProxyMedia(run["proxy"]):
+                notes.append("%s: Resolve didn't take its proxy" % clip_name)
+        first, frames = int(run["first_frame"]), int(run["frames"])
+        added = media_pool.AppendToTimeline([{
+            "mediaPoolItem": clip,
+            "startFrame": first,
+            "endFrame": first + frames - 1,
+            "recordFrame": record,
+            "trackIndex": 1,
+        }])
+        if not added:
+            notes.append("%s: Resolve refused to add the clip" % clip_name)
+            continue
+        overlay = run.get("overlay")
+        if overlay and os.path.isfile(overlay):
+            item = import_overlay(media_pool, overlays_bin, overlay)
+            if not media_pool.AppendToTimeline([{
+                "mediaPoolItem": item,
+                "startFrame": 0,
+                "endFrame": frames - 1,
+                "recordFrame": record,
+                "trackIndex": 2,
+                "mediaType": 1,
+            }]):
+                notes.append("%s: Resolve refused to add its overlay" % clip_name)
+        elif overlay:
+            notes.append("%s: its overlay file is missing" % clip_name)
+        placed += 1
+        record += frames
+    pm.SaveProject()
+    return {"ok": True, "project": name, "timeline": timeline.GetName(), "placed": placed,
+            "notes": notes}
+
+
 def handle(request, resolve_factory=connect):
     command = request.get("command")
-    if command not in ("status", "add_overlays"):
+    if command not in ("status", "add_overlays", "new_project"):
         return {"ok": False, "error": "bad_request", "message": "unknown command %r" % command}
     try:
         resolve = resolve_factory()
         if command == "status":
             return status(resolve)
+        if command == "new_project":
+            return new_project(resolve, request)
         return add_overlays(resolve, request.get("items", []))
     except BridgeError as e:
         return {"ok": False, "error": e.code, "message": e.message}
