@@ -12,7 +12,14 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   it was recorded, and which stored run it is (settings are under the gear in
   the sidebar). **Make missing proxies** writes a
   half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
-  Resolve picks up as proxy media and the coming frame viewer scrubs.
+  Resolve picks up as proxy media and the Time page steps through. Double-click
+  a clip (or tick it and press **Time it**) to time it.
+- **Time**: step through a clip frame by frame (← →, Shift for ten, Page Up/Down
+  for a second), put Start, the sector splits and Finish on the right frames
+  (**M** sets the next one), and watch each sector and the lap against the
+  course's best as you go. **Commit run** saves it to the run database the same
+  way the Resolve script does (same run ids and fields). Markers not yet
+  committed are kept as a draft, so closing the app loses nothing.
 - **Runs**: a leaderboard per course from your run database (best lap, optimal
   lap, sector times with the fastest highlighted). Tick runs to move them to
   another course, ignore them or delete them; add or rename courses. Each change

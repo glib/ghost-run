@@ -48,7 +48,8 @@ pub struct Library {
     db: Connection,
 }
 
-const VERSION: u32 = 1;
+/// 1: clips. 2: marker drafts.
+const VERSION: u32 = 2;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -79,6 +80,14 @@ impl Library {
                proxy_state TEXT NOT NULL DEFAULT '',
                proxy_path TEXT,
                proxy_error TEXT
+             );
+             CREATE TABLE IF NOT EXISTS drafts (
+               path TEXT PRIMARY KEY,
+               course_id TEXT NOT NULL,
+               frames TEXT NOT NULL,
+               confidence TEXT NOT NULL,
+               source TEXT NOT NULL,
+               updated_ms INTEGER NOT NULL
              );",
         )?;
         db.pragma_update(None, "user_version", VERSION)?;
@@ -157,6 +166,76 @@ impl Library {
     }
 }
 
+/// Markers placed on a clip but not yet committed as a run.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Draft {
+    pub course_id: String,
+    /// Marker name → frame.
+    pub frames: std::collections::BTreeMap<String, i64>,
+    /// Marker name → auto-markers' confidence (hand-placed markers have none).
+    pub confidence: std::collections::BTreeMap<String, f64>,
+    /// `hand` or `auto`.
+    pub source: String,
+}
+
+impl Library {
+    pub fn draft(&self, clip: &Path) -> Result<Option<Draft>> {
+        let row = self
+            .db
+            .query_row(
+                "SELECT course_id, frames, confidence, source FROM drafts WHERE path = ?1",
+                [path_text(clip)],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(row.map(|(course_id, frames, confidence, source)| Draft {
+            course_id,
+            frames: serde_json::from_str(&frames).unwrap_or_default(),
+            confidence: serde_json::from_str(&confidence).unwrap_or_default(),
+            source,
+        }))
+    }
+
+    pub fn set_draft(&self, clip: &Path, draft: &Draft) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO drafts VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                path_text(clip),
+                draft.course_id,
+                serde_json::to_string(&draft.frames)?,
+                serde_json::to_string(&draft.confidence)?,
+                draft.source,
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_draft(&self, clip: &Path) -> Result<()> {
+        self.db
+            .execute("DELETE FROM drafts WHERE path = ?1", [path_text(clip)])?;
+        Ok(())
+    }
+
+    /// Clips with a draft, so the Library can show them.
+    pub fn drafted(&self) -> Result<std::collections::HashSet<PathBuf>> {
+        let mut stmt = self.db.prepare("SELECT path FROM drafts")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+}
+
 /// Paths are stored as text; the scanner skips any that aren't UTF-8.
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
@@ -230,6 +309,25 @@ mod tests {
         let keep = [PathBuf::from("/v/a.mp4")].into_iter().collect();
         assert_eq!(again.retain(&keep).unwrap(), 2);
         assert_eq!(again.clips().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn keeps_drafts_until_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("l.sqlite3")).unwrap();
+        let clip = Path::new("/v/a.mp4");
+        assert_eq!(lib.draft(clip).unwrap(), None);
+        let draft = Draft {
+            course_id: "c".into(),
+            frames: [("Start".to_owned(), 10), ("Finish".to_owned(), 99)].into(),
+            confidence: [("Start".to_owned(), 0.8)].into(),
+            source: "auto".into(),
+        };
+        lib.set_draft(clip, &draft).unwrap();
+        assert_eq!(lib.draft(clip).unwrap(), Some(draft));
+        assert!(lib.drafted().unwrap().contains(clip));
+        lib.clear_draft(clip).unwrap();
+        assert_eq!(lib.draft(clip).unwrap(), None);
     }
 
     #[test]

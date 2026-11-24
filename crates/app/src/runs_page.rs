@@ -193,8 +193,14 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     delete.connect_clicked(move |_| delete_dialog(&p));
     let p = page.clone();
     shared.subscribe(move |change| {
-        // Our own saves are already shown; anything else may have moved the file.
-        if change == Change::Settings {
+        // Our own saves are already shown; other pages' (and new settings) are not.
+        let stale = !p
+            .state
+            .borrow()
+            .file
+            .as_ref()
+            .is_some_and(DatabaseFile::unchanged);
+        if change == Change::Settings || (change == Change::Runs && stale) {
             load(&p);
         }
     });

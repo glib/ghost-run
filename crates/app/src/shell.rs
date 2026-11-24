@@ -6,12 +6,18 @@ use adw::prelude::*;
 /// page (the old resolve-ingest window, with its own header bar).
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
-    let pages: [(&str, &str, &str, gtk::Widget); 3] = [
+    let pages: [(&str, &str, &str, gtk::Widget); 4] = [
         (
             "library",
             "Library",
             "folder-videos-symbolic",
             crate::library_page::page(&shared),
+        ),
+        (
+            "time",
+            "Time",
+            "alarm-symbolic",
+            crate::time_page::page(&shared),
         ),
         (
             "runs",
@@ -67,16 +73,34 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         }
         split2.set_show_content(true);
     });
+    // A clip picked to be timed opens the Time page.
+    let list2 = list.clone();
+    shared.subscribe(move |change| {
+        if change == crate::shared::Change::TimeClip {
+            select(&list2, "time");
+        }
+    });
     // GHOST_RUN_PAGE=runs (etc.) opens on that page: for screenshots and testing.
     let start = std::env::var("GHOST_RUN_PAGE").unwrap_or_default();
+    if !select(&list, &start) {
+        list.select_row(list.row_at_index(0).as_ref());
+    }
+    // GHOST_RUN_CLIP=<path> opens that clip on the Time page: for screenshots.
+    if let Some(clip) = std::env::var_os("GHOST_RUN_CLIP") {
+        shared.time_clip(clip.into());
+    }
+    split
+}
+
+/// Shows the page called `name`; false if there is none.
+fn select(list: &gtk::ListBox, name: &str) -> bool {
     let mut index = 0;
     while let Some(row) = list.row_at_index(index) {
-        if row.widget_name() == start.as_str() {
-            break;
+        if row.widget_name() == name {
+            list.select_row(Some(&row));
+            return true;
         }
         index += 1;
     }
-    let first = list.row_at_index(index).or_else(|| list.row_at_index(0));
-    list.select_row(first.as_ref());
-    split
+    false
 }

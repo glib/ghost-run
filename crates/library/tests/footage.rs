@@ -166,3 +166,39 @@ fn scans_makes_proxies_and_notices_changes() {
     let report = scan(&folders, &library, &cancel, |_| {}).unwrap();
     assert_eq!((report.found, report.removed, report.probed), (2, 1, 1));
 }
+
+/// Frames read by number match ffmpeg's own frame-exact selection, from the
+/// original (long-GOP H.264) and from its proxy.
+#[test]
+fn reads_exact_frames_by_number() {
+    if !have_ffmpeg() {
+        eprintln!("skipped: no ffmpeg");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("DJI_20260817075236_0012_D.MP4");
+    clip(&path);
+    let info = library::probe::probe(&path).unwrap();
+    let made = proxy::make(&path, &info, &Cancel::default(), |_| {}).unwrap();
+    let proxy_info = library::probe::probe(&made).unwrap();
+    for (file, info) in [(&path, &info), (&made, &proxy_info)] {
+        let (w, h) = library::frames::display_size(info, 90);
+        for n in [0i64, 1, 14, 15, 31, 58] {
+            let frame = library::frames::read_frame(file, info, n, 90).unwrap();
+            assert_eq!((frame.width, frame.height), (w, h));
+            let reference = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(file)
+                .args([
+                    "-vf",
+                    &format!("select=eq(n\\,{n}),scale={w}:{h}:flags=bilinear"),
+                ])
+                .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+                .output()
+                .unwrap()
+                .stdout;
+            assert_eq!(frame.rgba, reference, "frame {n} of {}", file.display());
+        }
+        assert!(library::frames::read_frame(file, info, 500, 90).is_err());
+    }
+}
