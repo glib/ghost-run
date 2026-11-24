@@ -17,6 +17,11 @@ spec.loader.exec_module(bridge)
 class FakeMediaPoolItem:
     def __init__(self, path):
         self.path = path
+        self.proxy = None
+
+    def LinkProxyMedia(self, path):
+        self.proxy = path
+        return True
 
     def GetClipProperty(self, name):
         return self.path if name == "File Path" else None
@@ -40,11 +45,15 @@ class FakeItem:
 
 
 class FakeTimeline:
-    def __init__(self, tracks):
+    def __init__(self, tracks, name="Edit"):
         self.tracks = tracks  # list of lists of FakeItem, track 1 first
+        self.name = name
 
     def GetName(self):
-        return "Edit"
+        return self.name
+
+    def GetStartFrame(self):
+        return 86400
 
     def GetTrackCount(self, kind):
         return len(self.tracks)
@@ -99,6 +108,10 @@ class FakeMediaPool:
         self.current.clips.extend(items)
         return items
 
+    def CreateEmptyTimeline(self, name):
+        self.timeline = FakeTimeline([[]], name)
+        return self.timeline
+
     def AppendToTimeline(self, infos):
         for info in infos:
             length = info["endFrame"] - info["startFrame"] + 1
@@ -109,12 +122,22 @@ class FakeMediaPool:
 
 
 class FakeProject:
-    def __init__(self, timeline):
+    def __init__(self, timeline, name="Race day"):
         self.timeline = timeline
         self.pool = FakeMediaPool(timeline)
+        self.name = name
+        self.settings = {}
 
     def GetName(self):
-        return "Race day"
+        return self.name
+
+    def SetSetting(self, key, value):
+        self.settings[key] = value
+        return True
+
+    def SetCurrentTimeline(self, timeline):
+        self.timeline = timeline
+        return True
 
     def GetCurrentTimeline(self):
         return self.timeline
@@ -126,6 +149,22 @@ class FakeProject:
 class FakeResolve:
     def __init__(self, project):
         self.project = project
+        self.projects = {"Race day": project}
+        self.saved = 0
+
+    def GetProjectListInCurrentFolder(self):
+        return list(self.projects)
+
+    def CreateProject(self, name):
+        if name in self.projects:
+            return None
+        self.project = FakeProject(None, name)
+        self.projects[name] = self.project
+        return self.project
+
+    def SaveProject(self):
+        self.saved += 1
+        return True
 
     def GetProjectManager(self):
         return self
@@ -233,6 +272,51 @@ class AddOverlaysTests(unittest.TestCase):
                 os.environ["RESOLVE_SCRIPT_API"] = old
         self.assertFalse(reply["ok"])
         self.assertIn(reply["error"], ("not_installed", "not_running"))
+
+
+class NewProjectTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.resolve = FakeResolve(FakeProject(FakeTimeline([[]])))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def file(self, name):
+        path = os.path.join(self.dir.name, name)
+        Path(path).write_bytes(b"x")
+        return path
+
+    def test_runs_go_back_to_back_with_overlays_above_and_proxies_linked(self):
+        runs = [
+            {"clip": self.file("a.MP4"), "proxy": self.file("a.mov"),
+             "overlay": self.file("a.overlay.mov"), "first_frame": 30, "frames": 300},
+            {"clip": self.file("b.MP4"), "proxy": None,
+             "overlay": None, "first_frame": 0, "frames": 120},
+            {"clip": "/v/gone.MP4", "proxy": None, "overlay": None,
+             "first_frame": 0, "frames": 10},
+        ]
+        reply = bridge.handle({"command": "new_project", "name": "Race day", "fps": "59.94",
+                               "width": 3840, "height": 2160, "runs": runs},
+                              lambda: self.resolve)
+        self.assertTrue(reply["ok"], reply)
+        # "Race day" was taken.
+        self.assertEqual(reply["project"], "Race day 2")
+        self.assertEqual(reply["placed"], 2)
+        self.assertEqual(reply["notes"], ["gone.MP4: the clip is missing"])
+        project = self.resolve.projects["Race day 2"]
+        self.assertEqual(project.settings["timelineFrameRate"], "59.94")
+        self.assertEqual(project.settings["timelineResolutionWidth"], "3840")
+        v1, v2 = project.timeline.tracks
+        self.assertEqual([(i.start, i.end, i.left) for i in v1],
+                         [(86400, 86700, 30), (86700, 86820, 0)])
+        self.assertEqual([(i.start, i.end, i.left) for i in v2], [(86400, 86700, 0)])
+        self.assertTrue(v1[0].mpi.proxy.endswith("a.mov"))
+        self.assertEqual(self.resolve.saved, 1)
+
+    def test_names_never_clash(self):
+        self.assertEqual(bridge.unused_name({"A", "A 2"}, "A"), "A 3")
+        self.assertEqual(bridge.unused_name(set(), "A"), "A")
 
 
 if __name__ == "__main__":

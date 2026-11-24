@@ -42,7 +42,12 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   needs Resolve Studio running with Preferences > System > General > External
   scripting using set to **Local**; Ghost Run reaches it in the `davincibox`
   Distrobox (another name can be set in Settings), or directly if Resolve is
-  installed on the system. **Check** shows whether Resolve answers.
+  installed on the system. **Check** shows whether Resolve answers. **New
+  project…** starts a Resolve project with the finished runs back to back, in
+  the order ridden: each clip (with its audio) from a second before Start to the
+  end of its overlay on V1, the overlay above it on V2, and the clip's proxy
+  linked, at the first clip's frame rate and size. (A project template can be
+  chosen in Settings for later; it isn't used yet.)
 - **Import**: verified card archive + editing copies (formerly
   [resolve-ingest](docs/ingest/import.md)).
 

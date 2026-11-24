@@ -80,6 +80,7 @@ struct Page {
     resolve_status: gtk::Label,
     resolve_buttons: gtk::Box,
     add_to_resolve: gtk::Button,
+    new_project: gtk::Button,
     replies: mpsc::Sender<Reply>,
 }
 
@@ -172,7 +173,12 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     add_to_resolve.set_tooltip_text(Some(
         "Put each finished overlay on the track above its clip in Resolve's current timeline",
     ));
+    let new_project = button("New project…");
+    new_project.set_tooltip_text(Some(
+        "Start a Resolve project with the finished runs back to back: clips on V1, overlays on V2, proxies linked",
+    ));
     resolve_buttons.append(&check);
+    resolve_buttons.append(&new_project);
     resolve_buttons.append(&add_to_resolve);
     resolve_row.append(&resolve_buttons);
     content.append(&resolve_row);
@@ -205,6 +211,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         resolve_status,
         resolve_buttons,
         add_to_resolve: add_to_resolve.clone(),
+        new_project: new_project.clone(),
         replies: reply_tx,
     };
 
@@ -229,6 +236,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     add.connect_clicked(move |_| add_unrendered(&p));
     let p = page.clone();
     check.connect_clicked(move |_| ask_resolve(&p, None));
+    let p = page.clone();
+    new_project.connect_clicked(move |_| new_project_dialog(&p));
     let p = page.clone();
     add_to_resolve.connect_clicked(move |_| {
         let items = finished(&p);
@@ -456,6 +465,148 @@ fn add_overlays(
         "command": "add_overlays", "items": requests,
     }))?;
     Ok(describe_added(&reply))
+}
+
+/// Asks for the new project's name, then makes it.
+fn new_project_dialog(p: &Page) {
+    let items = finished(p);
+    if items.is_empty() {
+        return;
+    }
+    let dialog = adw::AlertDialog::new(
+        Some("New Resolve project"),
+        Some(&format!(
+            "{} {} back to back, in the order ridden: each clip from a second before Start to the end of its overlay on V1, the overlay above it on V2, proxies linked. It starts from Resolve's default project settings, at the first clip's frame rate and size.",
+            items.len(),
+            if items.len() == 1 { "run" } else { "runs" }
+        )),
+    );
+    let entry = gtk::Entry::new();
+    entry.set_text(&format!(
+        "Ghost Run {}",
+        chrono::Local::now().format("%Y-%m-%d")
+    ));
+    entry.set_activates_default(true);
+    entry.update_property(&[gtk::accessible::Property::Label("Project name")]);
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_responses(&[("cancel", "Cancel"), ("create", "Create")]);
+    dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("create"));
+    dialog.set_close_response("cancel");
+    let window = p.shared.window.clone();
+    let p = p.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "create" {
+            return;
+        }
+        let name = entry.text().trim().to_owned();
+        let container = p.shared.settings().resolve_container.clone();
+        let order = ride_order(&p);
+        let mut items = items.clone();
+        items.sort_by_key(|(id, _, _)| order.get(id).cloned().unwrap_or_default());
+        let tx = p.replies.clone();
+        p.resolve_buttons.set_sensitive(false);
+        p.resolve_status.remove_css_class("error");
+        p.resolve_status.set_text("Making the project in Resolve…");
+        std::thread::spawn(move || {
+            let bridge = crate::resolve::Bridge::new(container.as_deref());
+            let result = create_project(&bridge, &name, &items).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Reply::Resolve(result));
+        });
+    });
+    dialog.present(Some(&window));
+}
+
+/// Run id → when it was ridden, to put runs in order.
+fn ride_order(p: &Page) -> HashMap<String, (String, String)> {
+    p.shared
+        .settings()
+        .run_database
+        .clone()
+        .and_then(|path| TimerDatabase::load(&path).ok())
+        .map(|db| {
+            db.runs
+                .iter()
+                .map(|r| {
+                    (
+                        r.id.clone(),
+                        (timer_core::matching::run_order_time(r), r.id.clone()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn create_project(
+    bridge: &crate::resolve::Bridge,
+    name: &str,
+    items: &[(String, PathBuf, PathBuf)],
+) -> anyhow::Result<String> {
+    let library = Library::open_default()?;
+    let clips = library.clips()?;
+    let mut runs = Vec::new();
+    let mut format = None;
+    for (run_id, clip, overlay) in items {
+        let first_frame = library
+            .rendered(run_id)?
+            .map(|r| r.first_frame)
+            .ok_or_else(|| anyhow::anyhow!("{run_id}'s overlay isn't recorded"))?;
+        let frames = library::probe::probe(overlay)
+            .ok()
+            .and_then(|i| i.frames)
+            .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
+        let known = clips.iter().find(|c| &c.path == clip);
+        let proxy = known.and_then(|c| match &c.proxy {
+            library::ProxyState::Ready(p) => Some(p.clone()),
+            _ => None,
+        });
+        if format.is_none() {
+            let info = match known.and_then(|c| c.info.clone()) {
+                Some(i) => i,
+                None => library::probe::probe(clip)?,
+            };
+            format = Some(info);
+        }
+        runs.push(serde_json::json!({
+            "clip": clip, "proxy": proxy, "overlay": overlay,
+            "first_frame": first_frame, "frames": frames,
+        }));
+    }
+    let info = format.ok_or_else(|| anyhow::anyhow!("no runs"))?;
+    // Upright size, as Resolve shows a rotated clip.
+    let (width, height) = if info.rotation.rem_euclid(180) == 90 {
+        (info.height, info.width)
+    } else {
+        (info.width, info.height)
+    };
+    let reply = bridge.request(&serde_json::json!({
+        "command": "new_project",
+        "name": name,
+        "fps": timer_render::job::trim(info.fps()),
+        "width": width,
+        "height": height,
+        "runs": runs,
+    }))?;
+    Ok(describe_project(&reply))
+}
+
+fn describe_project(reply: &serde_json::Value) -> String {
+    let placed = reply["placed"].as_u64().unwrap_or(0);
+    let mut text = format!(
+        "Made project {} with {placed} {} on timeline {}.",
+        reply["project"].as_str().unwrap_or("?"),
+        if placed == 1 { "run" } else { "runs" },
+        reply["timeline"].as_str().unwrap_or("?"),
+    );
+    let notes: Vec<&str> = reply["notes"]
+        .as_array()
+        .map(|n| n.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if !notes.is_empty() {
+        text.push_str(&format!(" {}.", notes.join("; ")));
+    }
+    text
 }
 
 /// What adding overlays did, in a sentence or two.
@@ -761,8 +912,9 @@ fn show(p: &Page) {
         .items
         .iter()
         .any(|i| matches!(i.status, Status::Queued | Status::Stopped));
-    p.add_to_resolve
-        .set_sensitive(s.items.iter().any(|i| matches!(i.status, Status::Done(_))));
+    let any_done = s.items.iter().any(|i| matches!(i.status, Status::Done(_)));
+    p.add_to_resolve.set_sensitive(any_done);
+    p.new_project.set_sensitive(any_done);
     p.start.set_visible(!rendering);
     p.start.set_sensitive(waiting);
     p.stop.set_visible(rendering);
@@ -792,6 +944,16 @@ fn button(title: &str) -> gtk::Button {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn says_what_the_new_project_has() {
+        let reply = json!({"ok": true, "project": "Ghost Run 2026-11-24 2", "timeline": "Ghost Run 2026-11-24 2",
+            "placed": 2, "notes": ["c.MP4: the clip is missing"]});
+        assert_eq!(
+            describe_project(&reply),
+            "Made project Ghost Run 2026-11-24 2 with 2 runs on timeline Ghost Run 2026-11-24 2. c.MP4: the clip is missing."
+        );
+    }
 
     #[test]
     fn says_what_adding_to_resolve_did() {
