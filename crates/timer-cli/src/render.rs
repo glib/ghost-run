@@ -6,8 +6,14 @@ use std::time::Instant;
 
 use clap::Args;
 use timer_core::overlay::OverlayPayload;
+use timer_core::overlay::OverlayPayload as Payload;
 use timer_render::FrameRenderer;
-use timer_render::encode::{Encoder, FrameRate, Output, Timecode, encoder_threads, probe};
+use timer_render::encode::{
+    EncodeError, Encoder, FrameRate, Output, Plan, Timecode, concat, plan, probe,
+};
+
+/// The smallest stretch of frames worth its own ffmpeg.
+const MIN_CHUNK_FRAMES: i64 = 120;
 
 #[derive(Args)]
 pub struct RenderArgs {
@@ -29,7 +35,10 @@ pub struct RenderArgs {
     /// Write only this clip frame, as an image
     #[arg(long)]
     still: Option<i64>,
-    /// Encoder threads (default: one per core, as many as fit in half the free memory)
+    /// ffmpeg processes to split the render across (default: planned from cores and free memory)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    jobs: Option<u32>,
+    /// Encoder threads in each (default: planned from cores and free memory)
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
     threads: Option<u32>,
 }
@@ -64,27 +73,21 @@ pub fn render(
         check_fps(fps, info.rate, source)?;
     }
     let (start, finish) = (payload.start_frame, payload.finish_frame);
-    let mut renderer = FrameRenderer::new(payload, width, height);
-    let mut panel = renderer.blank_panel();
-    let threads = args
-        .threads
-        .map_or_else(|| encoder_threads(width, height), |t| t as usize);
-    let output = |timecode, first| Output {
-        path: &args.out,
+    let planned = plan(width, height);
+    let mut plan = Plan {
+        jobs: args.jobs.map_or(planned.jobs, |j| j as usize),
+        threads: args.threads.map_or(planned.threads, |t| t as usize),
+    };
+    let job = Job {
+        payload: &payload,
         width,
         height,
-        region: renderer.layout().panel,
         rate,
-        timecode,
-        first,
-        threads,
+        threads: plan.threads,
     };
 
     if let Some(n) = args.still {
-        let mut encoder = Encoder::start(&output(None, n))?;
-        renderer.render_panel(n, &mut panel);
-        encoder.write_frame(&panel)?;
-        encoder.finish()?;
+        job.encode(&args.out, None, n, n)?;
         println!("Wrote {} (clip frame {n})", args.out.display());
         return Ok(());
     }
@@ -104,21 +107,42 @@ pub fn render(
     let timecode = source_tc.plus(first).format(rate);
 
     let began = Instant::now();
-    let mut encoder = Encoder::start(&output(Some(&timecode), first))?;
-    for n in first..=last {
-        renderer.render_panel(n, &mut panel);
-        encoder.write_frame(&panel)?;
-    }
-    encoder.finish()?;
     let count = last - first + 1;
+    plan.jobs = plan.jobs.min((count / MIN_CHUNK_FRAMES).max(1) as usize);
+    let sequence = args.out.to_string_lossy().contains('%');
+    if plan.jobs == 1 {
+        job.encode(&args.out, Some(&timecode), first, last)?;
+    } else {
+        // Contiguous stretches, encoded at once and joined.
+        let jobs = plan.jobs as i64;
+        let bounds: Vec<(i64, i64)> = (0..jobs)
+            .map(|k| (first + count * k / jobs, first + count * (k + 1) / jobs - 1))
+            .collect();
+        if sequence {
+            job.encode_all(&bounds, |_| args.out.clone())?;
+        } else {
+            let parts_dir = args.out.with_extension("parts");
+            std::fs::create_dir_all(&parts_dir)
+                .map_err(|e| format!("could not create {}: {e}", parts_dir.display()))?;
+            let part = |k: usize| parts_dir.join(format!("part_{k:03}.mov"));
+            let result = job.encode_all(&bounds, part).and_then(|()| {
+                let parts: Vec<PathBuf> = (0..bounds.len()).map(part).collect();
+                concat(&parts, &args.out, Some(&timecode))
+            });
+            let _ = std::fs::remove_dir_all(&parts_dir);
+            result?;
+        }
+    }
     let secs = began.elapsed().as_secs_f64();
     println!(
-        "Wrote {}: {count} frames ({width}x{height}, {:.3} fps) in {secs:.1} s ({:.0} frames/s, {threads} encoder threads)",
+        "Wrote {}: {count} frames ({width}x{height}, {:.3} fps) in {secs:.1} s ({:.0} frames/s; {} ffmpeg x {} threads)",
         args.out.display(),
         rate.fps(),
         count as f64 / secs.max(1e-9),
+        plan.jobs,
+        plan.threads,
     );
-    if args.out.to_string_lossy().contains('%') {
+    if sequence {
         println!("Its frames are numbered by clip frame, from {first} to {last}.");
     } else {
         println!(
@@ -127,6 +151,67 @@ pub fn render(
         );
     }
     Ok(())
+}
+
+/// What every stretch of the overlay is drawn and encoded with.
+struct Job<'a> {
+    payload: &'a Payload,
+    width: u32,
+    height: u32,
+    rate: FrameRate,
+    threads: usize,
+}
+
+impl Job<'_> {
+    /// Clip frames `from..=to` into `path`, panel only (ffmpeg pads it out).
+    fn encode(
+        &self,
+        path: &Path,
+        timecode: Option<&str>,
+        from: i64,
+        to: i64,
+    ) -> Result<(), EncodeError> {
+        let mut renderer = FrameRenderer::new(self.payload.clone(), self.width, self.height);
+        let mut panel = renderer.blank_panel();
+        let mut encoder = Encoder::start(&Output {
+            path,
+            width: self.width,
+            height: self.height,
+            region: renderer.layout().panel,
+            rate: self.rate,
+            timecode,
+            first: from,
+            threads: self.threads,
+        })?;
+        for n in from..=to {
+            renderer.render_panel(n, &mut panel);
+            encoder.write_frame(&panel)?;
+        }
+        encoder.finish()
+    }
+
+    /// Each `(from, to)` stretch into `path(index)`, all at once.
+    fn encode_all(
+        &self,
+        bounds: &[(i64, i64)],
+        path: impl Fn(usize) -> PathBuf + Sync,
+    ) -> Result<(), EncodeError> {
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = bounds
+                .iter()
+                .enumerate()
+                .map(|(k, &(from, to))| {
+                    let path = &path;
+                    scope.spawn(move || self.encode(&path(k), None, from, to))
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().expect("encoder thread"))
+                .collect::<Result<Vec<()>, _>>()
+                .map(|_| ())
+        })
+    }
 }
 
 /// `--fps` turns marker frames into seconds; if it isn't the clip's rate, the
