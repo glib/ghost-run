@@ -16,9 +16,22 @@ pub enum Change {
     TimeClip,
     /// Runs were picked to render ([`Shared::render_runs`]).
     Render,
+    /// Runs were picked to go into Resolve ([`Shared::send_to_resolve`]).
+    Resolve,
+}
+
+/// Where runs sent to Resolve go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveTarget {
+    /// Each overlay above its clip on the open timeline.
+    Timeline,
+    /// A new project with the runs back to back.
+    NewProject,
 }
 
 type Listener = Rc<dyn Fn(Change)>;
+/// Runs for Resolve and where they go.
+type ToResolve = Option<(ResolveTarget, Vec<String>)>;
 
 #[derive(Clone)]
 pub struct Shared {
@@ -32,6 +45,8 @@ pub struct Shared {
     to_time: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// Runs picked to render, for the Output page to take.
     to_render: Rc<RefCell<Vec<String>>>,
+    /// Runs picked to go into Resolve, for the Output page to take.
+    to_resolve: Rc<RefCell<ToResolve>>,
 }
 
 impl Shared {
@@ -50,6 +65,7 @@ impl Shared {
             load_error,
             to_time: Rc::default(),
             to_render: Rc::default(),
+            to_resolve: Rc::default(),
         }
     }
 
@@ -98,6 +114,18 @@ impl Shared {
     /// The runs picked to render, once.
     pub fn take_runs_to_render(&self) -> Vec<String> {
         std::mem::take(&mut self.to_render.borrow_mut())
+    }
+
+    /// Sends these runs to Resolve (through the Output page, which renders
+    /// any overlay that's missing or out of date first).
+    pub fn send_to_resolve(&self, target: ResolveTarget, run_ids: Vec<String>) {
+        *self.to_resolve.borrow_mut() = Some((target, run_ids));
+        self.notify(Change::Resolve);
+    }
+
+    /// The runs picked to go into Resolve, once.
+    pub fn take_runs_for_resolve(&self) -> ToResolve {
+        self.to_resolve.borrow_mut().take()
     }
 
     pub fn notify(&self, change: Change) {
