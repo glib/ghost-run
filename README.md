@@ -1,13 +1,42 @@
-# Resolve Timer
+# Ghost Run
 
-DaVinci Resolve Studio timing tool for comparing mountain bike race runs and
-building Fusion/Text+ overlays from source clip markers.
+Self lap timing for mountain-bike racing (downhill, enduro): film your runs,
+time them by sector against your earlier runs, and watch them back with a split
+timer burned into the video.
 
-The project keeps Resolve-specific code behind small adapter, UI, and overlay
-modules. The timing, database, matching, and CLI code can be tested outside
-Resolve with the standard Python test runner.
+It is becoming one Linux desktop app, **Ghost Run**: import footage, place
+Start/S1…/Finish markers (automatically, from a reference run), compare runs per
+track, render overlays and hand them to DaVinci Resolve. Today the app has the
+**Import** page (verified card archive + editing copies, formerly
+[resolve-ingest](docs/ingest/import.md)); the rest is being built
+(`docs/decisions/0003-one-app-ghost-run.md`). Until then, timing lives in the
+older Resolve script described below, and the `rtimer` command line.
 
-## What It Does
+## Install the app (Linux)
+
+Needs Rust, GTK 4.12+, libadwaita 1.5+ and FFmpeg. On Bazzite, build it in a
+Fedora distrobox:
+
+```bash
+sudo dnf install gcc pkgconf-pkg-config gtk4-devel libadwaita-devel   # Debian/Ubuntu: libgtk-4-dev libadwaita-1-dev
+make install
+```
+
+This installs `ghost-run` and `rtimer` in `~/.local/bin`, and a **Ghost Run**
+launcher with its icon in your app menu. Built inside a distrobox, the launcher
+starts it through `distrobox enter <box>`, since it uses the box's GTK.
+`make uninstall` removes them. With no arguments `ghost-run` opens the app;
+`ghost-run --help` lists the headless import commands.
+
+## The Resolve script (older tool)
+
+The Python script runs inside DaVinci Resolve Studio: it reads markers from a
+Media Pool clip and builds Fusion/Text+ overlays. It keeps working until the app
+covers the workflow, then it will be removed. Resolve-specific code sits behind
+small adapter, UI, and overlay modules; the timing, database, matching, and CLI
+code can be tested outside Resolve with the standard Python test runner.
+
+### What It Does
 
 - Reads timing markers from one selected Media Pool clip.
 - Previews sector and lap times for a selected course.
@@ -188,10 +217,13 @@ to correct existing DJI records; add `--media-root` to also resolve other names.
 
 ## Development
 
-Run the test suite with:
-
-```powershell
-python -m unittest discover -s tests
+```bash
+cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test   # Rust: the app, ingest, timing, render
+python -m unittest discover -s tests                                        # Python (needs PyYAML, Pillow)
 ```
 
-`PyYAML` is required for YAML read/write.
+The Rust workspace: `crates/app` (the GTK app, binary `ghost-run`),
+`crates/ingest` (import), `crates/timer-core` (timing and the YAML database),
+`crates/timer-render` (overlay video), `crates/timer-align` (auto-markers),
+`crates/timer-cli` (`rtimer`). The render, auto-markers and ingest media tests
+need FFmpeg.

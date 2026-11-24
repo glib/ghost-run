@@ -1,7 +1,7 @@
 //! Run one real fixture through the public headless core without scanning its neighbors.
 //! cargo run --release --example real_sample -- INPUT OUTPUT_DIRECTORY
 use anyhow::{Context, Result};
-use resolve_ingest::{
+use ingest::{
     jobs::Jobs,
     media,
     model::*,
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         }
     });
     pipeline::run(&mut jobs, &mut batch, None, &cancel, &tx).await?;
-    resolve_ingest::diagnostics::export(&batch, &output.join("report.json"))?;
+    ingest::diagnostics::export(&batch, &output.join("report.json"))?;
     println!("{}: {}", batch.status, batch.summary());
     anyhow::ensure!(
         batch.status == "Completed",

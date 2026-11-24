@@ -1,4 +1,4 @@
-use resolve_ingest::{
+use ingest::{
     discovery,
     jobs::Jobs,
     media,

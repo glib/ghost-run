@@ -1,4 +1,4 @@
-use resolve_ingest::{
+use ingest::{
     jobs::Jobs,
     model::*,
     settings::{Destination, Settings},
@@ -223,8 +223,7 @@ async fn review_identifies_the_unwritable_destination_without_copying_media() {
         let destination = f.dir.path().join(folder);
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o555)).unwrap();
         let result =
-            resolve_ingest::pipeline::plan(f.settings.clone(), vec![candidate], &Cancel::default())
-                .await;
+            ingest::pipeline::plan(f.settings.clone(), vec![candidate], &Cancel::default()).await;
         fs::set_permissions(&destination, fs::Permissions::from_mode(0o755)).unwrap();
         let error = result.unwrap_err();
         let message = format!("{error:#}");
@@ -249,7 +248,7 @@ async fn review_identifies_the_unwritable_destination_without_copying_media() {
 async fn archive_only_recovery_does_not_need_card_and_detects_corruption() {
     let f = Fixture::new();
     fs::write(f.settings.source.join("clip.bad"), b"camera bytes").unwrap();
-    let mut b = resolve_ingest::pipeline::plan(
+    let mut b = ingest::pipeline::plan(
         f.settings.clone(),
         vec![f.candidate("clip.bad")],
         &Cancel::default(),
@@ -258,7 +257,7 @@ async fn archive_only_recovery_does_not_need_card_and_detects_corruption() {
     .unwrap();
     let mut jobs = Jobs::open(&f.dir.path().join("jobs")).unwrap();
     let tx = events();
-    resolve_ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert!(b.items[0].complete());
@@ -275,12 +274,12 @@ async fn archive_only_recovery_does_not_need_card_and_detects_corruption() {
     b.items[0].archive = Stage::Checking;
     jobs.save(&b).unwrap();
     let mut recovered = jobs.load(&b.id).unwrap();
-    resolve_ingest::pipeline::run(&mut jobs, &mut recovered, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut recovered, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert!(recovered.items[0].complete());
     fs::write(&archived, b"changed bytes").unwrap();
-    resolve_ingest::pipeline::run(&mut jobs, &mut recovered, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut recovered, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert_eq!(recovered.items[0].archive, Stage::Failed);
@@ -290,7 +289,7 @@ async fn archive_only_recovery_does_not_need_card_and_detects_corruption() {
 async fn changed_source_and_existing_output_never_get_overwritten() {
     let f = Fixture::new();
     fs::write(f.settings.source.join("clip.bad"), b"original").unwrap();
-    let mut b = resolve_ingest::pipeline::plan(
+    let mut b = ingest::pipeline::plan(
         f.settings.clone(),
         vec![f.candidate("clip.bad")],
         &Cancel::default(),
@@ -300,7 +299,7 @@ async fn changed_source_and_existing_output_never_get_overwritten() {
     fs::write(f.settings.source.join("clip.bad"), b"changed longer").unwrap();
     let mut jobs = Jobs::open(&f.dir.path().join("jobs")).unwrap();
     let tx = events();
-    resolve_ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert_eq!(b.items[0].archive, Stage::Failed);
@@ -313,7 +312,7 @@ async fn changed_source_and_existing_output_never_get_overwritten() {
         .join(&b.items[0].archive_path);
     fs::create_dir_all(target.parent().unwrap()).unwrap();
     fs::write(&target, b"unrelated").unwrap();
-    resolve_ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert_eq!(fs::read(target).unwrap(), b"unrelated");
@@ -322,7 +321,7 @@ async fn changed_source_and_existing_output_never_get_overwritten() {
 async fn cancellation_and_cleanup_preserve_verified_results() {
     let f = Fixture::new();
     fs::write(f.settings.source.join("clip.bad"), b"original").unwrap();
-    let mut b = resolve_ingest::pipeline::plan(
+    let mut b = ingest::pipeline::plan(
         f.settings.clone(),
         vec![f.candidate("clip.bad")],
         &Cancel::default(),
@@ -333,11 +332,11 @@ async fn cancellation_and_cleanup_preserve_verified_results() {
     let tx = events();
     let cancel = Cancel::default();
     cancel.request();
-    resolve_ingest::pipeline::run(&mut jobs, &mut b, None, &cancel, &tx)
+    ingest::pipeline::run(&mut jobs, &mut b, None, &cancel, &tx)
         .await
         .unwrap();
     assert_eq!(b.items[0].archive, Stage::Canceled);
-    resolve_ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
+    ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &tx)
         .await
         .unwrap();
     assert!(b.items[0].complete());
@@ -352,7 +351,7 @@ async fn cancellation_and_cleanup_preserve_verified_results() {
         staging_partial: None,
         error: None,
     });
-    assert_eq!(resolve_ingest::pipeline::cleanup(&jobs, &b).unwrap(), 7);
+    assert_eq!(ingest::pipeline::cleanup(&jobs, &b).unwrap(), 7);
     assert!(root.exists(&b.items[0].archive_path).unwrap());
 }
 
@@ -360,7 +359,7 @@ async fn cancellation_and_cleanup_preserve_verified_results() {
 async fn journal_migrates_v1_and_updates_one_item_without_losing_neighbors() {
     let f = Fixture::new();
     fs::write(f.settings.source.join("clip.bad"), b"original").unwrap();
-    let mut batch = resolve_ingest::pipeline::plan(
+    let mut batch = ingest::pipeline::plan(
         f.settings.clone(),
         vec![f.candidate("clip.bad")],
         &Cancel::default(),
@@ -410,7 +409,7 @@ async fn journal_migrates_v1_and_updates_one_item_without_losing_neighbors() {
 
 #[test]
 fn camera_data_streams_can_omit_codec_name() {
-    let probe: resolve_ingest::media::Probe = serde_json::from_value(
+    let probe: ingest::media::Probe = serde_json::from_value(
         serde_json::json!({"streams":[{"index":2,"codec_type":"data"}],"format":{}}),
     )
     .unwrap();

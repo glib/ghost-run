@@ -1,5 +1,5 @@
 use super::*;
-use crate::catalog;
+use ingest::catalog;
 
 pub(super) fn build(v: &View) -> gtk::ColumnView {
     let sorted = gtk::SortListModel::new(Some(v.store.clone()), None::<gtk::Sorter>);

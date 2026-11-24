@@ -1,4 +1,4 @@
-use resolve_ingest::{jobs::Jobs, media, model::Cancel};
+use ingest::{jobs::Jobs, media, model::Cancel};
 use std::{
     fs,
     process::{Command, Stdio},

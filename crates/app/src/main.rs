@@ -1,6 +1,10 @@
+//! Ghost Run: the desktop app (no arguments) and the headless import commands.
+
+mod ui;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use resolve_ingest::{
+use ingest::{
     diagnostics, discovery,
     jobs::Jobs,
     model::Cancel,
@@ -62,13 +66,8 @@ enum Action {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.command.is_none() || matches!(cli.command, Some(Action::Demo)) {
-        #[cfg(feature = "desktop")]
-        {
-            resolve_ingest::ui::run(matches!(cli.command, Some(Action::Demo)));
-            return Ok(());
-        }
-        #[cfg(not(feature = "desktop"))]
-        anyhow::bail!("This build has no desktop UI. Use --help for headless commands.");
+        ui::run(matches!(cli.command, Some(Action::Demo)));
+        return Ok(());
     }
     tokio::runtime::Runtime::new()?.block_on(headless(cli.command.unwrap()))
 }
@@ -84,7 +83,7 @@ async fn headless(action: Action) -> Result<()> {
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
-            if let resolve_ingest::model::Event::Message(m) = event {
+            if let ingest::model::Event::Message(m) = event {
                 eprintln!("{m}");
             }
         }
@@ -174,7 +173,7 @@ async fn headless(action: Action) -> Result<()> {
         }
         Action::Doctor => println!(
             "{}\nMOV muxer and PCM s24le encoder available",
-            resolve_ingest::media::check_tools(&cancel).await?
+            ingest::media::check_tools(&cancel).await?
         ),
         Action::Demo => unreachable!(),
     }

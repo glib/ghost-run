@@ -1,5 +1,7 @@
 mod table;
-use crate::{
+use adw::prelude::*;
+use gtk::{gio, glib};
+use ingest::{
     diagnostics::human_bytes,
     discovery,
     jobs::Jobs,
@@ -8,8 +10,6 @@ use crate::{
     pipeline,
     settings::{self, Destination, Settings, Workflow},
 };
-use adw::prelude::*;
-use gtk::{gio, glib};
 use std::{cell::RefCell, path::PathBuf, rc::Rc, sync::mpsc, time::Duration};
 
 enum Command {
@@ -108,7 +108,7 @@ fn ellipsize(l: &gtk::Label) {
 }
 pub fn run(demo: bool) {
     let app = adw::Application::builder()
-        .application_id("io.github.resolve_ingest.ResolveIngest")
+        .application_id("io.github.glib.GhostRun")
         .build();
     app.connect_activate(move |app| build(app, demo));
     app.run_with_args(&["resolve-ingest"]);
@@ -149,14 +149,14 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, events: Events, 
                         s.save()?; Reply::Settings(s)
                     }
                     Command::History => Reply::History(jobs.history()?),
-                    Command::Export(id, path) => { crate::diagnostics::export(&jobs.load(&id)?, &path)?; Reply::Info(format!("Report saved to {}", path.display())) }
+                    Command::Export(id, path) => { ingest::diagnostics::export(&jobs.load(&id)?, &path)?; Reply::Info(format!("Report saved to {}", path.display())) }
                     Command::Cleanup(id, remove) => {
                         let batch = jobs.load(&id)?;
                         if remove { Reply::Info(format!("Removed {} of owned partial files.", human_bytes(pipeline::cleanup(&jobs, &batch)?))) }
                         else { let partials = pipeline::stale_partials(&batch)?; Reply::Info(format!("{} owned partials, {}. Use Remove owned partials in History to clean up. Verified files are retained.", partials.len(), human_bytes(partials.iter().map(|p| p.2).sum()))) }
                     }
                     Command::Probe(i, s, mut c) => {
-                        let file = crate::storage::Root::source(&s.source)?.read(&c.relative)?;
+                        let file = ingest::storage::Root::source(&s.source)?.read(&c.relative)?;
                         c.probe = Some(media::probe(&file, Some(jobs.lock_fd()), &cancel).await?); c.probe_error = None;
                         c.editing = c.probe.as_ref().is_some_and(|p| p.video().is_some()); Reply::Probe(i, c)
                     }
@@ -215,13 +215,13 @@ fn build(app: &adw::Application, demo: bool) {
     }
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Resolve Ingest")
+        .title("Ghost Run")
         .default_width(1100)
         .default_height(800)
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Resolve Ingest", "")));
+    header.set_title_widget(Some(&adw::WindowTitle::new("Ghost Run", "Import")));
     let history = action_button("History");
     let settings_button = action_button("Settings");
     header.pack_end(&settings_button);
@@ -975,9 +975,9 @@ fn refresh(v: &View) {
     }
 }
 fn visible_candidate(s: &State, c: &Candidate) -> bool {
-    (s.file_type.is_empty() || crate::catalog::file_type(c) == s.file_type)
+    (s.file_type.is_empty() || ingest::catalog::file_type(c) == s.file_type)
         && s.since
-            .is_none_or(|since| crate::catalog::recorded(c).date.date() >= since)
+            .is_none_or(|since| ingest::catalog::recorded(c).date.date() >= since)
 }
 fn rebuild_types(v: &View) {
     let types: std::collections::BTreeSet<_> = {
@@ -985,10 +985,13 @@ fn rebuild_types(v: &View) {
         if let Some(b) = &s.batch {
             b.items
                 .iter()
-                .map(|i| crate::catalog::file_type(&i.source))
+                .map(|i| ingest::catalog::file_type(&i.source))
                 .collect()
         } else {
-            s.candidates.iter().map(crate::catalog::file_type).collect()
+            s.candidates
+                .iter()
+                .map(ingest::catalog::file_type)
+                .collect()
         }
     };
     let mut names = vec!["All types".to_string()];
