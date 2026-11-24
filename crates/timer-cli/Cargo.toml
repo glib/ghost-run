@@ -11,8 +11,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+csv.workspace = true
+chrono.workspace = true
 serde_json.workspace = true
+serde_norway.workspace = true
 timer-core = { path = "../timer-core" }
+timer-render = { path = "../timer-render" }
 
 [dev-dependencies]
 tempfile.workspace = true

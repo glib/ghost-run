@@ -39,8 +39,10 @@ sensible option and list assumptions in the PR description.
 
 ## Layout
 - `crates/timer-core/` — Rust core: `models` (courses, runs), `database` (YAML v2 load/save; `yaml.rs` writes PyYAML's exact layout and quoting), `capture_time`, `markers`, `timing`, `matching` (clip → stored run; the fingerprint hash matches Python's byte for byte), `stats` (best/optimal lap), `validation`, `py` (Python-compatible coercions, `repr`, JSON escaping, half-even rounding).
-- `crates/timer-cli/` — `rtimer`: the Python CLI's database commands (`courses`, `runs`, `stats`, `validate-db`, `normalize-db`) with identical arguments and output.
-- `tests/fixtures/` — made-up databases for the parity check.
+- `crates/timer-core/src/overlay.rs` — what the overlay shows for a clip (`overlay_payload`: compared only with runs captured before it, never its own stored run), its rows, text and delta colours.
+- `crates/timer-render/` — draws overlay frames (the Fusion comp's layout and colours, minus the panel blur, which a separate file can't do; bundled JetBrains Mono, OFL) and encodes them with ffmpeg: ProRes 4444 with alpha (`prores_aw`, ~4x faster than `prores_ks`) carrying the clip's timecode, or an image sequence numbered by clip frame.
+- `crates/timer-cli/` — `rtimer`: the Python CLI's database and overlay commands (`courses`, `runs`, `stats`, `validate-db`, `normalize-db`, `overlay-payload`, `overlay-text`) with identical arguments and output, plus `render` (Rust only). `tests/render.rs` needs ffmpeg: it skips without it locally, and fails in CI (`REQUIRE_FFMPEG`).
+- `tests/fixtures/` — made-up databases and marker CSVs for the parity check.
 - `src/resolve_timer/` — Python package. Resolve-free core: `timing.py`, `database.py` (YAML, schema v2), `matching.py`, `stats.py`, `markers.py`, `models.py`, `validation.py`, `service.py`, `cli.py`, `summary_card.py`. Resolve-only: `resolve_adapter.py`, `ui.py`, `ui_controller.py`, `runtime_support.py`, and the Fusion part of `overlay.py`.
 - `scripts/` — Resolve launcher and installers (Linux davincibox, Windows).
 - `tests/` — unittest; Resolve is faked, so everything runs without it.

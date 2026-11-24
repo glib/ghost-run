@@ -1,16 +1,23 @@
 //! `rtimer`: the run-database commands of the Python `resolve-timer` CLI, with
 //! the same arguments and output, so the two can be compared (`scripts/parity.sh`).
 
+mod render;
+mod selected;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{Value, json};
+use timer_core::TimerDatabase;
 use timer_core::matching::clip_fingerprint;
+use timer_core::overlay::{ComparisonMode, OverlayPayload, delta_text, duration, overlay_payload};
 use timer_core::stats::{CourseStats, StatsOptions, compute_course_stats};
 use timer_core::timing::format_duration;
 use timer_core::validation::validate_database;
-use timer_core::{DatabaseError, TimerDatabase};
+
+use render::RenderArgs;
+use selected::SelectedArgs;
 
 #[derive(Parser)]
 #[command(name = "rtimer", about = "Resolve Timer run database tools")]
@@ -45,6 +52,46 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print overlay payload JSON from a marker CSV
+    OverlayPayload {
+        #[command(flatten)]
+        selected: SelectedArgs,
+        #[arg(long, value_enum, default_value = "best_lap")]
+        mode: Mode,
+    },
+    /// Print final overlay text preview
+    OverlayText {
+        #[command(flatten)]
+        selected: SelectedArgs,
+        #[arg(long, value_enum, default_value = "best_lap")]
+        mode: Mode,
+    },
+    /// Render the overlay to a transparent video file (needs ffmpeg)
+    Render {
+        #[command(flatten)]
+        selected: SelectedArgs,
+        #[arg(long, value_enum, default_value = "best_lap")]
+        mode: Mode,
+        #[command(flatten)]
+        render: RenderArgs,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Mode {
+    #[value(name = "best_lap")]
+    BestLap,
+    #[value(name = "optimal")]
+    Optimal,
+}
+
+impl From<Mode> for ComparisonMode {
+    fn from(m: Mode) -> Self {
+        match m {
+            Mode::BestLap => Self::BestLap,
+            Mode::Optimal => Self::Optimal,
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -58,7 +105,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode, DatabaseError> {
+fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut db = TimerDatabase::load(&cli.db)?;
     match cli.command {
         Command::Courses => {
@@ -128,23 +175,67 @@ fn run(cli: Cli) -> Result<ExitCode, DatabaseError> {
                 match &stats.best_lap {
                     Some(best) => println!(
                         "Best: {} ({})",
-                        duration(best.timing.lap_seconds),
+                        lap_duration(best.timing.lap_seconds),
                         best.run.id
                     ),
                     None => println!("Best: --:--.---"),
                 }
                 match stats.optimal_seconds {
-                    Some(s) => println!("Optimal: {}", duration(s)),
+                    Some(s) => println!("Optimal: {}", lap_duration(s)),
                     None => println!("Optimal: --:--.---"),
                 }
             }
+        }
+        Command::OverlayPayload { selected, mode } => {
+            let selected = selected.read()?;
+            let payload = overlay_payload(&db, &selected, mode.into())?;
+            println!("{}", python_json(&payload_json(&payload)));
+        }
+        Command::OverlayText { selected, mode } => {
+            let selected = selected.read()?;
+            let payload = overlay_payload(&db, &selected, mode.into())?;
+            println!("{}", payload.final_text());
+        }
+        Command::Render {
+            selected,
+            mode,
+            render,
+        } => {
+            let selected = selected.read()?;
+            let payload = overlay_payload(&db, &selected, mode.into())?;
+            render::render(payload, &render)?;
         }
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn duration(seconds: f64) -> String {
+fn lap_duration(seconds: f64) -> String {
     format_duration(seconds).unwrap_or_else(|_| "--:--.---".into())
+}
+
+/// The overlay payload as the Python tool's `OverlayPayload.to_dict()`.
+fn payload_json(p: &OverlayPayload) -> Value {
+    json!({
+        "course_id": p.course_id,
+        "run_id": p.run_id,
+        "start_frame": p.start_frame,
+        "finish_frame": p.finish_frame,
+        "source_fps": p.source_fps,
+        "marker_frames": p.marker_frames,
+        "sector_reference_seconds": p.sector_reference_seconds,
+        "best_lap_seconds": p.best_lap_seconds,
+        "optimal_lap_seconds": p.optimal_lap_seconds,
+        "comparison_mode": p.comparison_mode.as_str(),
+        "generated_name": p.generated_name(),
+        "final_text": p.final_text(),
+        "rows": p.rows().iter().map(|r| json!({
+            "label": r.label,
+            "seconds": r.duration_seconds,
+            "duration": duration(r.duration_seconds),
+            "delta_seconds": r.delta_seconds,
+            "delta": r.delta_seconds.map(|_| delta_text(r.delta_seconds)),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 fn stats_json(course_id: &str, stats: &CourseStats<'_>) -> Value {

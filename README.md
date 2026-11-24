@@ -123,6 +123,31 @@ resolve-timer --db examples/timer_db.yaml overlay-text --course lower_whistler_a
 
 Marker CSV files need `name,frame` columns.
 
+## Overlay as a video file (Rust `rtimer`, in progress)
+
+`rtimer render` writes the overlay as one transparent video to lay over the clip,
+instead of a Fusion comp, so the timeline stays light. It takes the same
+arguments as `overlay-text`, and needs [ffmpeg](https://ffmpeg.org/) on `PATH`:
+
+```powershell
+cargo build --release -p timer-cli
+target\release\rtimer --db timer_db.yaml render --course lower_whistler_a_line --markers markers.csv --filename GX010123.MP4 --fps 59.94 --source D:\Media\Runs\GX010123.MP4 --out GX010123_timer.mov
+```
+
+- The `.mov` is ProRes 4444 with alpha, the clip's size and frame rate, from one
+  second before `Start` (`--pre-roll`) to five seconds after `Finish` (`--hold`).
+  It carries the clip's timecode, so selecting it and the clip and using
+  **Auto Align Clips → Based on Timecode** lines it up, however the clip is trimmed.
+- Without `--source`, it's 3840×2160 (`--size`) at `--fps`, and the command
+  prints the clip frame it starts at.
+- `--out overlay_%05d.png` writes a PNG sequence instead (about a sixth of the
+  size), numbered by clip frame. `--still FRAME --out frame.png` writes one frame
+  to check the look.
+- It looks like the Fusion overlay, except the panel can't blur the video behind
+  it, so it's a plain translucent panel.
+- ProRes 4444 at 4K is large: about 1.2 GB a minute. On a 4-core machine,
+  encoding runs at about 15 frames a second.
+
 Runs store `capture_time` so comparisons are chronological by source clip capture
 time. DJI filenames containing `YYYYMMDDHHMMSS` are the primary source because
 their timestamp survives copying. Other filenames fall back to filesystem

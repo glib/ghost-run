@@ -18,8 +18,32 @@ pub const CAPTURE_TIME_SOURCES: [&str; 4] = [
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Invalid isoformat string: '{0}'")]
+#[error("{0}")]
 pub struct InvalidCaptureTime(pub String);
+
+impl InvalidCaptureTime {
+    /// Python's `date.fromisoformat` error for `text`: a range error for a
+    /// well-formed but impossible date, else "Invalid isoformat string".
+    fn for_text(text: &str) -> Self {
+        let b = text.as_bytes();
+        let shaped = b.len() == 10 && b[4] == b'-' && b[7] == b'-';
+        let parts = (
+            digits::<i32>(&text[..4.min(text.len())]),
+            text.get(5..7).and_then(digits::<u32>),
+        );
+        let message = match (shaped, parts) {
+            (true, (Some(0), _)) => "year 0 is out of range".to_owned(),
+            (true, (Some(_), Some(m))) if !(1..=12).contains(&m) => {
+                "month must be in 1..12".to_owned()
+            }
+            (true, (Some(_), Some(_))) if text.get(8..10).and_then(digits::<u32>).is_some() => {
+                "day is out of range for month".to_owned()
+            }
+            _ => format!("Invalid isoformat string: '{text}'"),
+        };
+        Self(message)
+    }
+}
 
 /// Normalizes a stored capture time to UTC `YYYY-MM-DDTHH:MM:SSZ`.
 ///
@@ -34,7 +58,7 @@ pub fn normalize(text: &str) -> Result<Option<String>, InvalidCaptureTime> {
     }
     parse_iso(&text.replace('Z', "+00:00"))
         .map(|dt| Some(format_utc(dt)))
-        .ok_or_else(|| InvalidCaptureTime(text.to_owned()))
+        .ok_or_else(|| InvalidCaptureTime::for_text(text))
 }
 
 /// [`normalize`] for a YAML value (null and non-strings as Python's `str()`).
@@ -51,7 +75,7 @@ pub fn from_date(run_date: &str) -> Result<Option<String>, InvalidCaptureTime> {
     if run_date.is_empty() {
         return Ok(None);
     }
-    let date = parse_date(run_date).ok_or_else(|| InvalidCaptureTime(run_date.to_owned()))?;
+    let date = parse_date(run_date).ok_or_else(|| InvalidCaptureTime::for_text(run_date))?;
     let dt = date.and_time(NaiveTime::from_hms_opt(23, 59, 59).expect("valid time"));
     Ok(Some(format_utc(Utc.from_utc_datetime(&dt).fixed_offset())))
 }
@@ -85,7 +109,9 @@ fn parse_date(s: &str) -> Option<NaiveDate> {
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return None;
     }
-    NaiveDate::from_ymd_opt(digits(&s[0..4])?, digits(&s[5..7])?, digits(&s[8..10])?)
+    // Python's dates start at year 1; chrono's go further back.
+    let year = digits(&s[0..4]).filter(|y| *y >= 1)?;
+    NaiveDate::from_ymd_opt(year, digits(&s[5..7])?, digits(&s[8..10])?)
 }
 
 fn parse_iso(s: &str) -> Option<DateTime<FixedOffset>> {
@@ -192,7 +218,11 @@ mod tests {
             from_date("2026-05-31").unwrap().as_deref(),
             Some("2026-05-31T23:59:59Z")
         );
-        assert!(from_date("31/05/2026").is_err());
+        let err = |s: &str| from_date(s).unwrap_err().to_string();
+        assert_eq!(err("31/05/2026"), "Invalid isoformat string: '31/05/2026'");
+        assert_eq!(err("2026-13-01"), "month must be in 1..12");
+        assert_eq!(err("2026-02-30"), "day is out of range for month");
+        assert_eq!(err("0000-01-01"), "year 0 is out of range");
     }
 
     #[test]
