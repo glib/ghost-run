@@ -6,6 +6,7 @@ members = [
     "crates/timer-render",
     "crates/timer-align",
     "crates/ingest",
+    "crates/library",
     "crates/app",
 ]
 

@@ -1,5 +1,7 @@
 //! Ghost Run: the desktop app (no arguments) and the headless import commands.
 
+mod library_page;
+mod shell;
 mod ui;
 
 use anyhow::{Context, Result};

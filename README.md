@@ -6,9 +6,16 @@ timer burned into the video.
 
 It is becoming one Linux desktop app, **Ghost Run**: import footage, place
 Start/S1…/Finish markers (automatically, from a reference run), compare runs per
-track, render overlays and hand them to DaVinci Resolve. Today the app has the
-**Import** page (verified card archive + editing copies, formerly
-[resolve-ingest](docs/ingest/import.md)); the rest is being built
+track, render overlays and hand them to DaVinci Resolve. Today the app has:
+
+- **Library**: every clip in your footage folders (Folders… to add them), when
+  it was recorded, and which stored run it is. **Make missing proxies** writes a
+  half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
+  Resolve picks up as proxy media and the coming frame viewer scrubs.
+- **Import**: verified card archive + editing copies (formerly
+  [resolve-ingest](docs/ingest/import.md)).
+
+The rest is being built
 (`docs/decisions/0003-one-app-ghost-run.md`). Until then, timing lives in the
 older Resolve script described below, and the `rtimer` command line.
 
