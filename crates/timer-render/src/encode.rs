@@ -4,7 +4,7 @@
 //! timecode, however the clip is trimmed).
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 #[derive(Debug, thiserror::Error)]
@@ -140,25 +140,59 @@ fn drop_count(rate: FrameRate) -> i64 {
     i64::from(rate.nominal()) / 15 // 2 at 29.97, 4 at 59.94
 }
 
-/// Encoder threads for `width × height` ProRes: one per core, but no more
-/// than fit in half the memory available. Each thread holds a few full frames
-/// (at 4K about 230 MB a thread, plus about 600 MB for ffmpeg's queues), so
-/// threads, not speed, are what can run a machine out of memory.
-pub fn encoder_threads(width: u32, height: u32) -> usize {
-    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
-    match available_memory() {
-        Some(bytes) => threads_for_memory(width, height, bytes, cores),
-        None => cores,
-    }
+/// How to split a render across ffmpeg processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    /// ffmpeg processes, each encoding its own stretch of frames.
+    pub jobs: usize,
+    /// Encoder threads in each.
+    pub threads: usize,
 }
 
-fn threads_for_memory(width: u32, height: u32, available: u64, cores: usize) -> usize {
-    // A 10-bit 4:4:4 frame with alpha, as the encoder holds it.
+/// Encoder threads one ffmpeg process can keep busy at 4K: its pad step
+/// (one thread, building every full frame) manages about 90 frames a second,
+/// and each ProRes thread about 11. Smaller frames pad faster.
+const FED_THREADS_4K: f64 = 8.0;
+
+/// The plan for `width × height` ProRes on this machine (see [`plan_for`]).
+pub fn plan(width: u32, height: u32) -> Plan {
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    plan_for(width, height, cores, available_memory())
+}
+
+/// The most encoding that the processes' pad steps can feed, within `cores`
+/// threads and half the `available` memory: each process takes about ten
+/// frames' worth (about 660 MB at 4K) and each thread three and a half (about
+/// 230 MB), so memory, not speed, is what can run a machine out. Running four
+/// processes of four threads once took an 8 GB box down.
+pub fn plan_for(width: u32, height: u32, cores: usize, available: Option<u64>) -> Plan {
+    let cores = cores.max(1);
+    // A 10-bit 4:4:4 frame with alpha, as ffmpeg holds it.
     let frame = u64::from(width) * u64::from(height) * 8;
-    let (base, per_thread) = (frame * 9, frame * 7 / 2);
-    let budget = available / 2;
-    let fit = budget.saturating_sub(base) / per_thread.max(1);
-    (fit as usize).clamp(1, cores.max(1))
+    let (per_job, per_thread) = (frame * 10, frame * 7 / 2);
+    let budget = available.map_or(u64::MAX, |a| a / 2);
+    let fed = (FED_THREADS_4K * (3840.0 * 2160.0) / (frame / 8).max(1) as f64).max(1.0);
+    let mut best = Plan {
+        jobs: 1,
+        threads: 1,
+    };
+    let mut best_key = (0.0, 0usize, 0usize);
+    for jobs in 1..=cores {
+        for threads in 1..=cores / jobs {
+            let memory = jobs as u64 * (per_job + threads as u64 * per_thread);
+            if memory > budget && (jobs, threads) != (1, 1) {
+                continue;
+            }
+            // Frames a second, in threads' worth; then fewer threads, fewer jobs.
+            let speed = jobs as f64 * (threads as f64).min(fed);
+            let key = (speed, usize::MAX - jobs * threads, usize::MAX - jobs);
+            if key > best_key {
+                best_key = key;
+                best = Plan { jobs, threads };
+            }
+        }
+    }
+    best
 }
 
 /// `MemAvailable` from `/proc/meminfo` (Linux), in bytes.
@@ -244,7 +278,7 @@ pub struct Output<'a> {
     pub timecode: Option<&'a str>,
     /// The first frame's number, in an image sequence (`frame_%05d.png`).
     pub first: i64,
-    /// Encoder threads (see [`encoder_threads`]).
+    /// Encoder threads (see [`plan`]).
     pub threads: usize,
 }
 
@@ -343,6 +377,49 @@ impl Encoder {
     }
 }
 
+/// Joins `.mov` parts into `out` without re-encoding (ProRes frames stand
+/// alone, so this is lossless), giving the result `timecode`.
+pub fn concat(parts: &[PathBuf], out: &Path, timecode: Option<&str>) -> Result<(), EncodeError> {
+    let failed = |message: String| EncodeError::Failed {
+        program: "ffmpeg",
+        message,
+    };
+    let dir = parts
+        .first()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| failed("no parts to join".into()))?;
+    let list = dir.join("parts.txt");
+    let body: String = parts
+        .iter()
+        .map(|p| {
+            let path = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+            // The concat list quotes paths in '...'; a ' inside is written '\''.
+            format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''"))
+        })
+        .collect();
+    std::fs::write(&list, body)
+        .map_err(|e| failed(format!("could not write {}: {e}", list.display())))?;
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-f", "concat", "-safe", "0", "-i"])
+        .arg(&list)
+        .args(["-map", "0:v", "-c", "copy"]);
+    if let Some(tc) = timecode {
+        cmd.args(["-timecode", tc]);
+    }
+    let output = cmd.arg(out).output().map_err(|source| EncodeError::Spawn {
+        program: "ffmpeg",
+        source,
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(failed(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,14 +450,24 @@ mod tests {
     }
 
     #[test]
-    fn threads_fit_in_half_the_memory() {
+    fn plans_fit_in_half_the_memory() {
         let gb = 1024 * 1024 * 1024;
-        // 4K: ~600 MB base + ~230 MB a thread, within half of what's free.
-        assert_eq!(threads_for_memory(3840, 2160, 8 * gb, 16), 15);
-        assert_eq!(threads_for_memory(3840, 2160, 8 * gb, 4), 4);
-        assert_eq!(threads_for_memory(3840, 2160, 2 * gb, 16), 2);
-        assert_eq!(threads_for_memory(3840, 2160, gb, 16), 1);
-        assert_eq!(threads_for_memory(1920, 1080, 4 * gb, 16), 16);
+        let p = |jobs, threads| Plan { jobs, threads };
+        // The 4-core, 8 GB devbox: one process, as before.
+        assert_eq!(plan_for(3840, 2160, 4, Some(7 * gb)), p(1, 4));
+        // 32 cores with room: a process per ~8 threads.
+        assert_eq!(plan_for(3840, 2160, 32, Some(64 * gb)), p(4, 8));
+        // 32 cores but 8 GB free: fewer, within 4 GB.
+        let tight = plan_for(3840, 2160, 32, Some(8 * gb));
+        let used = tight.jobs as u64 * (663_552_000 + tight.threads as u64 * 232_243_200);
+        assert!(used <= 4 * gb, "{tight:?} uses {used}");
+        assert!(tight.jobs * tight.threads >= 8, "{tight:?}");
+        // Almost no memory: still one thread.
+        assert_eq!(plan_for(3840, 2160, 32, Some(gb / 2)), p(1, 1));
+        // Smaller frames pad faster, so one process feeds more threads.
+        assert_eq!(plan_for(1920, 1080, 16, Some(32 * gb)), p(1, 16));
+        // No memory figure (not Linux): by cores alone.
+        assert_eq!(plan_for(3840, 2160, 16, None), p(2, 8));
     }
 
     #[test]

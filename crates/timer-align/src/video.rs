@@ -38,7 +38,10 @@ pub fn read_frames(path: &Path, cache: Option<&Path>) -> Result<Frames, VideoErr
     {
         return Ok(frames);
     }
-    let frames = decode(path, fps)?;
+    // A GPU decoder is much faster for 4K, but `-hwaccel auto` can crash
+    // ffmpeg outright where the GPU libraries are missing (seen in CI), so
+    // fall back to decoding in software.
+    let frames = decode(path, fps, true).or_else(|_| decode(path, fps, false))?;
     if let Some(file) = &cache_file {
         // A cache that can't be written only costs time next run.
         let _ = save(file, &frames);
@@ -46,11 +49,14 @@ pub fn read_frames(path: &Path, cache: Option<&Path>) -> Result<Frames, VideoErr
     Ok(frames)
 }
 
-fn decode(path: &Path, fps: f64) -> Result<Frames, VideoError> {
-    let mut child = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error"])
-        // A GPU decoder if there is one (much faster for 4K); else software.
-        .args(["-hwaccel", "auto", "-i"])
+fn decode(path: &Path, fps: f64, gpu: bool) -> Result<Frames, VideoError> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    if gpu {
+        cmd.args(["-hwaccel", "auto"]);
+    }
+    let mut child = cmd
+        .arg("-i")
         .arg(path)
         .args(["-an", "-sn", "-dn", "-map", "0:v:0"])
         .args([

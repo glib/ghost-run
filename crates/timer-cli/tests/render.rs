@@ -73,6 +73,40 @@ fn renders_a_transparent_prores_file_with_timecode() {
     }
     assert!(info.contains("pix_fmt=yuva444p"), "{info}");
 
+    // Split across two ffmpeg processes and joined: the same file.
+    let split = dir.path().join("split.mov");
+    rtimer(&[
+        "--out",
+        split.to_str().unwrap(),
+        "--size",
+        "320x180",
+        "--hold",
+        "0",
+        "--jobs",
+        "2",
+    ]);
+    assert_eq!(probe(&split), info);
+    assert!(!dir.path().join("split.parts").exists());
+    let seq_dir = dir.path().join("seq");
+    std::fs::create_dir(&seq_dir).unwrap();
+    rtimer(&[
+        "--out",
+        seq_dir.join("f_%05d.png").to_str().unwrap(),
+        "--size",
+        "320x180",
+        "--hold",
+        "0",
+        "--jobs",
+        "2",
+    ]);
+    let mut names: Vec<String> = std::fs::read_dir(&seq_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let expected: Vec<String> = (40..=700).map(|n| format!("f_{n:05}.png")).collect();
+    assert_eq!(names, expected);
+
     // Over that file as the clip: its size, rate and timecode carry over,
     // and the overlay stops at the clip's last frame.
     let again = dir.path().join("again.mov");
