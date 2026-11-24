@@ -36,7 +36,13 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   folder beside the clip (or the folder set in Settings). It compares each
   sector with the best lap so far, or the optimal lap so far. Renders run one at
   a time on all the cores the machine's memory allows; Stop leaves no half-written
-  file.
+  file. **Add to open timeline** puts each finished overlay on the track above
+  its clip in DaVinci Resolve's current timeline, lined up frame for frame
+  (trimmed to the part of the clip that's on the timeline; never twice). This
+  needs Resolve Studio running with Preferences > System > General > External
+  scripting using set to **Local**; Ghost Run reaches it in the `davincibox`
+  Distrobox (another name can be set in Settings), or directly if Resolve is
+  installed on the system. **Check** shows whether Resolve answers.
 - **Import**: verified card archive + editing copies (formerly
   [resolve-ingest](docs/ingest/import.md)).
 

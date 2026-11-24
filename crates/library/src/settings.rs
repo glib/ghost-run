@@ -20,6 +20,8 @@ pub struct AppSettings {
     pub overlay_folder: Option<PathBuf>,
     /// What overlays compare each sector with.
     pub comparison: Comparison,
+    /// The Distrobox DaVinci Resolve is installed in (default `davincibox`).
+    pub resolve_container: Option<String>,
 }
 
 /// What an overlay compares the run with.
@@ -105,6 +107,7 @@ mod tests {
             resolve_template: None,
             overlay_folder: Some("/out".into()),
             comparison: Comparison::Optimal,
+            resolve_container: Some("resolve".into()),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);
