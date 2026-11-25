@@ -184,7 +184,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     ));
     let add_to_resolve = button("Add to open timeline");
     add_to_resolve.set_tooltip_text(Some(
-        "Put each finished overlay on the track above its clip in Resolve's current timeline",
+        "Put each finished overlay on the track above its clip in Resolve's current timeline, adding clips that aren't there yet at its end",
     ));
     let new_project = button("New project…");
     new_project.set_tooltip_text(Some(
@@ -493,6 +493,7 @@ fn add_overlays(
     items: &[(String, PathBuf, PathBuf)],
 ) -> anyhow::Result<String> {
     let library = Library::open_default()?;
+    let clips = library.clips()?;
     let mut requests = Vec::new();
     for (run_id, clip, overlay) in items {
         let first_frame = library
@@ -503,8 +504,11 @@ fn add_overlays(
             .ok()
             .and_then(|i| i.frames)
             .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
+        // Sent in case the clip isn't on the timeline yet and the bridge adds it.
+        let proxy = ready_proxy(&clips, clip);
         requests.push(serde_json::json!({
-            "clip": clip, "overlay": overlay, "first_frame": first_frame, "frames": frames,
+            "clip": clip, "proxy": proxy, "overlay": overlay,
+            "first_frame": first_frame, "frames": frames,
         }));
     }
     let reply = bridge.request(&serde_json::json!({
@@ -715,10 +719,7 @@ fn create_project(
             .and_then(|i| i.frames)
             .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
         let known = clips.iter().find(|c| &c.path == clip);
-        let proxy = known.and_then(|c| match &c.proxy {
-            library::ProxyState::Ready(p) => Some(p.clone()),
-            _ => None,
-        });
+        let proxy = ready_proxy(&clips, clip);
         if format.is_none() {
             let info = match known.and_then(|c| c.info.clone()) {
                 Some(i) => i,
@@ -749,6 +750,17 @@ fn create_project(
     Ok(describe_project(&reply))
 }
 
+/// The clip's proxy, if the library has one ready.
+fn ready_proxy(clips: &[library::Clip], clip: &std::path::Path) -> Option<PathBuf> {
+    clips
+        .iter()
+        .find(|c| c.path == clip)
+        .and_then(|c| match &c.proxy {
+            library::ProxyState::Ready(p) => Some(p.clone()),
+            _ => None,
+        })
+}
+
 fn describe_project(reply: &serde_json::Value) -> String {
     let placed = reply["placed"].as_u64().unwrap_or(0);
     let mut text = format!(
@@ -777,6 +789,10 @@ fn describe_added(reply: &serde_json::Value) -> String {
             .sum::<u64>()
     };
     let (placed, already) = (count("placed"), count("already"));
+    let clips_added = results
+        .iter()
+        .filter(|r| r["clip_added"].as_bool().unwrap_or(false))
+        .count();
     let mut text = format!(
         "Added {placed} {} to {} in {}",
         if placed == 1 { "overlay" } else { "overlays" },
@@ -787,17 +803,39 @@ fn describe_added(reply: &serde_json::Value) -> String {
         text.push_str(&format!(" ({already} already there)"));
     }
     text.push('.');
-    let notes: Vec<String> = results
-        .iter()
-        .filter_map(|r| {
-            let note = r["note"].as_str()?;
-            let name = std::path::Path::new(r["clip"].as_str().unwrap_or(""))
-                .file_name()?
-                .to_string_lossy()
-                .into_owned();
-            Some(format!("{name}: {note}"))
-        })
-        .collect();
+    if clips_added > 0 {
+        text.push_str(&format!(
+            " {clips_added} {} on the timeline, so {} added at its end.",
+            if clips_added == 1 {
+                "clip wasn't"
+            } else {
+                "clips weren't"
+            },
+            if clips_added == 1 {
+                "it was"
+            } else {
+                "they were"
+            },
+        ));
+    }
+    let named = |key: &str| -> Vec<String> {
+        results
+            .iter()
+            .filter_map(|r| {
+                let note = r[key].as_str()?;
+                let name = std::path::Path::new(r["clip"].as_str().unwrap_or(""))
+                    .file_name()?
+                    .to_string_lossy()
+                    .into_owned();
+                Some(format!("{name}: {note}"))
+            })
+            .collect()
+    };
+    let proxies = named("proxy_note");
+    if !proxies.is_empty() {
+        text.push_str(&format!(" {}.", proxies.join("; ")));
+    }
+    let notes = named("note");
     if !notes.is_empty() {
         text.push_str(&format!(" Not added: {}.", notes.join("; ")));
     }
@@ -1167,11 +1205,13 @@ mod tests {
             {"clip": "/v/a.mp4", "placed": 1, "already": 0, "note": null},
             {"clip": "/v/b.mp4", "placed": 0, "already": 1, "note": null},
             {"clip": "/v/c.mp4", "placed": 0, "already": 0,
-             "note": "its clip isn't on the current timeline"},
+             "note": "its clip is missing"},
+            {"clip": "/v/d.mp4", "placed": 1, "already": 0, "clip_added": true,
+             "proxy_note": "Resolve didn't take its proxy", "note": null},
         ]});
         assert_eq!(
             describe_added(&reply),
-            "Added 1 overlay to Edit in Race day (1 already there). Not added: c.mp4: its clip isn't on the current timeline."
+            "Added 2 overlays to Edit in Race day (1 already there). 1 clip wasn't on the timeline, so it was added at its end. d.mp4: Resolve didn't take its proxy. Not added: c.mp4: its clip is missing."
         );
     }
 }

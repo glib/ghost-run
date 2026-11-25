@@ -241,9 +241,60 @@ class AddOverlaysTests(unittest.TestCase):
 
     def test_says_why_an_overlay_was_not_placed(self):
         reply = bridge.handle(self.request(clip="/v/elsewhere.mp4"), lambda: self.resolve)
-        self.assertIn("isn't on the current timeline", reply["results"][0]["note"])
+        self.assertEqual(reply["results"][0]["note"], "its clip is missing")
         reply = bridge.handle(self.request(overlay="/v/gone.mov"), lambda: self.resolve)
         self.assertIn("missing", reply["results"][0]["note"])
+
+    def test_a_clip_not_on_the_timeline_is_added_at_its_end_with_its_overlay(self):
+        new = os.path.join(self.dir.name, "DJI_0002.MP4")
+        proxy = os.path.join(self.dir.name, "DJI_0002.mov")
+        for p in (new, proxy):
+            Path(p).write_bytes(b"x")
+        reply = bridge.handle(self.request(clip=new, proxy=proxy, first_frame=60, frames=200),
+                              lambda: self.resolve)
+        result = reply["results"][0]
+        self.assertTrue(result["clip_added"], result)
+        self.assertEqual((result["placed"], result["note"]), (1, None))
+        v1, v2 = self.timeline.tracks
+        added = v1[-1]
+        # After the last item (which ends at 88000), from the overlay's first clip frame.
+        self.assertEqual((added.start, added.end, added.left), (88000, 88200, 60))
+        self.assertEqual(added.mpi.proxy, proxy)
+        self.assertEqual([(i.start, i.end, i.left) for i in v2], [(88000, 88200, 0)])
+        bins = [f.name for f in self.project.pool.root.subfolders]
+        self.assertIn("Ghost Run clips", bins)
+
+        # Again: the clip is there now, so nothing more is added.
+        reply = bridge.handle(self.request(clip=new, proxy=proxy, first_frame=60, frames=200),
+                              lambda: self.resolve)
+        self.assertFalse(reply["results"][0]["clip_added"])
+        self.assertEqual(reply["results"][0]["already"], 1)
+        self.assertEqual(len(v1), 3)
+
+    def test_a_clip_whose_timed_part_was_cut_is_added_again(self):
+        # The clip is on the timeline, but only frames 0..19, before the timed part.
+        self.timeline.tracks[0][0].end = 86420
+        reply = bridge.handle(self.request(), lambda: self.resolve)
+        self.assertTrue(reply["results"][0]["clip_added"])
+        self.assertEqual(self.timeline.tracks[0][-1].start, 88000)
+
+    def test_a_clip_already_in_the_media_pool_is_not_imported_again(self):
+        new = os.path.join(self.dir.name, "DJI_0003.MP4")
+        Path(new).write_bytes(b"x")
+        pooled = FakeMediaPoolItem(new)
+        self.project.pool.root.clips.append(pooled)
+        reply = bridge.handle(self.request(clip=new), lambda: self.resolve)
+        self.assertTrue(reply["results"][0]["clip_added"])
+        self.assertIs(self.timeline.tracks[0][-1].mpi, pooled)
+        # Only the overlay was imported.
+        self.assertEqual(self.project.pool.imports, 1)
+
+    def test_an_empty_timeline_starts_at_its_first_frame(self):
+        self.timeline.tracks = [[]]
+        reply = bridge.handle(self.request(), lambda: self.resolve)
+        self.assertEqual(reply["results"][0]["placed"], 1)
+        self.assertEqual(self.timeline.tracks[0][0].start, 86400)
+        self.assertEqual(self.timeline.tracks[1][0].start, 86400)
 
     def test_status_and_errors(self):
         reply = bridge.handle({"command": "status"}, lambda: self.resolve)

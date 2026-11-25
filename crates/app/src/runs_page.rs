@@ -107,7 +107,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
     let to_timeline = gtk::Button::with_label("Add to open timeline");
     to_timeline.set_tooltip_text(Some(
-        "Put each overlay on the track above its clip in Resolve's current timeline",
+        "Put each overlay on the track above its clip in Resolve's current timeline, adding clips that aren't there yet at its end",
     ));
     let to_project = gtk::Button::with_label("New project…");
     to_project.set_tooltip_text(Some(

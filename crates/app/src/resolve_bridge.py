@@ -8,7 +8,10 @@ Preferences > System > General > External scripting using set to Local.
 Requests:
   {"command": "status"}
   {"command": "add_overlays", "items": [
-      {"clip": path, "overlay": path, "first_frame": n, "frames": n}, ...]}
+      {"clip": path, "proxy": path or null, "overlay": path,
+       "first_frame": n, "frames": n}, ...]}
+    A clip whose timed part isn't on the timeline is added after the
+    timeline's last item first (on V1, with its audio, proxy linked).
   {"command": "new_project", "name": text, "fps": "29.97", "width": n, "height": n,
    "runs": [{"clip": path, "proxy": path or null, "overlay": path or null,
              "first_frame": n, "frames": n}, ...]}
@@ -171,6 +174,36 @@ def import_overlay(media_pool, folder, path):
     return imported[0]
 
 
+def find_in_pool(folder, path):
+    """The media pool item for `path` anywhere under `folder`, or None."""
+    for clip in folder.GetClipList() or []:
+        if same_file(clip.GetClipProperty("File Path"), path):
+            return clip
+    for sub in folder.GetSubFolderList() or []:
+        found = find_in_pool(sub, path)
+        if found is not None:
+            return found
+    return None
+
+
+def pool_clip(media_pool, clips_bin, path, proxy):
+    """The media pool item for a run's clip: one already in the project, or a
+    new import into the clips bin with its proxy linked. Returns (item, note)."""
+    clip = find_in_pool(media_pool.GetRootFolder(), path)
+    if clip is not None:
+        return clip, None
+    clip = import_overlay(media_pool, clips_bin, path)
+    if proxy and os.path.isfile(proxy) and not clip.LinkProxyMedia(proxy):
+        return clip, "Resolve didn't take its proxy"
+    return clip, None
+
+
+def timeline_end(timeline, items):
+    """The frame after the last video item, or the timeline's start if empty."""
+    ends = [item.GetEnd() for _, item in items]
+    return max(ends) if ends else int(timeline.GetStartFrame())
+
+
 def add_overlays(resolve, items):
     project = current_project(resolve)
     timeline = project.GetCurrentTimeline()
@@ -178,10 +211,11 @@ def add_overlays(resolve, items):
         raise BridgeError("no_timeline", "No timeline is open in Resolve's current project.")
     media_pool = project.GetMediaPool()
     folder = overlay_bin(media_pool)
+    clips_bin = None
     results = []
     for request in items:
         result = {"clip": request["clip"], "overlay": request["overlay"], "placed": 0,
-                  "already": 0, "note": None}
+                  "already": 0, "clip_added": False, "proxy_note": None, "note": None}
         results.append(result)
         if not os.path.isfile(request["overlay"]):
             result["note"] = "the overlay file is missing"
@@ -191,13 +225,31 @@ def add_overlays(resolve, items):
         for track, item in existing:
             if same_file(item_path(item), request["clip"]):
                 uses.append((track, item.GetStart(), item.GetEnd(), item.GetLeftOffset()))
-        if not uses:
-            result["note"] = "its clip isn't on the current timeline"
-            continue
         spots = placements(uses, request["first_frame"], request["frames"])
         if not spots:
-            result["note"] = "the timed part of the clip isn't on the timeline"
-            continue
+            # The timed part of the clip isn't on the timeline: add it at the end.
+            if not os.path.isfile(request["clip"]):
+                result["note"] = "its clip is missing"
+                continue
+            if clips_bin is None:
+                clips_bin = overlay_bin(media_pool, CLIPS_BIN)
+            clip, note = pool_clip(media_pool, clips_bin, request["clip"], request.get("proxy"))
+            first, frames = int(request["first_frame"]), int(request["frames"])
+            record = timeline_end(timeline, existing)
+            if not media_pool.AppendToTimeline([{
+                "mediaPoolItem": clip,
+                "startFrame": first,
+                "endFrame": first + frames - 1,
+                "recordFrame": record,
+                "trackIndex": 1,
+            }]):
+                result["note"] = "Resolve refused to add its clip to the timeline"
+                continue
+            result["clip_added"] = True
+            result["proxy_note"] = note
+            existing = timeline_items(timeline)
+            spots = [{"track": 2, "record_frame": record, "start_frame": 0,
+                      "end_frame": frames - 1}]
         overlay = None
         for spot in spots:
             length = spot["end_frame"] - spot["start_frame"] + 1
@@ -280,10 +332,9 @@ def new_project(resolve, request):
         if not os.path.isfile(run["clip"]):
             notes.append("%s: the clip is missing" % clip_name)
             continue
-        clip = import_overlay(media_pool, clips_bin, run["clip"])
-        if run.get("proxy") and os.path.isfile(run["proxy"]):
-            if not clip.LinkProxyMedia(run["proxy"]):
-                notes.append("%s: Resolve didn't take its proxy" % clip_name)
+        clip, note = pool_clip(media_pool, clips_bin, run["clip"], run.get("proxy"))
+        if note:
+            notes.append("%s: %s" % (clip_name, note))
         first, frames = int(run["first_frame"]), int(run["frames"])
         added = media_pool.AppendToTimeline([{
             "mediaPoolItem": clip,
