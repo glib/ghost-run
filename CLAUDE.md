@@ -7,6 +7,10 @@ shown as a video overlay. One user (Liam), public repo, no deploy, Linux only.
 It is becoming one GTK4/libadwaita desktop app, `ghost-run`
 (`docs/decisions/0003-one-app-ghost-run.md` has the plan and the order of PRs):
 Import (the merged resolve-ingest app), Library, Runs, Markers, Output/Resolve.
+What comes next is `docs/decisions/0005-workspaces-and-hydrated-footage.md`
+(issues #32–#38): workspaces per job (Inbox, Library, Videos, Tracks), the
+originals kept only on the NAS with a local catalog, footage hydrated per
+video, video kinds as templates, usage tracking, Strava.
 The timing workflow is still a Python script inside DaVinci Resolve Studio. It is moving to a
 standalone Rust tool (`docs/decisions/0001-standalone-rust-tool.md`): an overlay
 rendered to one transparent video file, then markers found automatically from
