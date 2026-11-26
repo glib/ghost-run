@@ -9,6 +9,7 @@
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
 //! - [`footage`]: the NAS footage root and local editing copies.
+//! - [`hydrate`]: local copies of NAS clips, made and removed.
 //! - [`preview`]: the catalog's small preview and audio of NAS clips.
 //! - [`overlays`]: where rendered overlays go.
 //! - [`backup`]: whether each clip's original is verified on the NAS.
@@ -21,6 +22,7 @@ pub mod backup;
 pub mod catalog_backup;
 pub mod footage;
 pub mod frames;
+pub mod hydrate;
 pub mod overlays;
 pub mod preview;
 pub mod probe;

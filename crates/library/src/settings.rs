@@ -22,7 +22,13 @@ pub struct AppSettings {
     pub comparison: Comparison,
     /// The Distrobox DaVinci Resolve is installed in (default `davincibox`).
     pub resolve_container: Option<String>,
+    /// Past this many GB of local copies of NAS clips, the Library suggests
+    /// removing some (default [`LOCAL_COPIES_GB`]).
+    pub local_copies_gb: Option<u32>,
 }
+
+/// The default for [`AppSettings::local_copies_gb`].
+pub const LOCAL_COPIES_GB: u32 = 50;
 
 /// What an overlay compares the run with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +61,11 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl AppSettings {
+    /// [`Self::local_copies_gb`] in bytes, with its default.
+    pub fn local_copies_limit(&self) -> u64 {
+        u64::from(self.local_copies_gb.unwrap_or(LOCAL_COPIES_GB)) * 1_000_000_000
+    }
+
     pub fn path() -> PathBuf {
         config_dir().join("settings.toml")
     }
@@ -108,6 +119,7 @@ mod tests {
             overlay_folder: Some("/out".into()),
             comparison: Comparison::Optimal,
             resolve_container: Some("resolve".into()),
+            local_copies_gb: Some(80),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);

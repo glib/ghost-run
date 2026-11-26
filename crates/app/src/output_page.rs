@@ -474,7 +474,7 @@ fn ask_resolve(p: &Page, items: Option<Vec<(String, PathBuf, PathBuf)>>) {
     p.resolve_status.remove_css_class("error");
     p.resolve_status.set_text(match items {
         None => "Asking Resolve…",
-        Some(_) => "Adding the overlays in Resolve…",
+        Some(_) => "Adding the overlays in Resolve (copying any clip only on the NAS here first)…",
     });
     std::thread::spawn(move || {
         let bridge = crate::resolve::Bridge::new(container.as_deref());
@@ -505,8 +505,7 @@ fn add_overlays(
             .and_then(|i| i.frames)
             .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
         // Sent in case the clip isn't on the timeline yet and the bridge adds it.
-        let proxy = ready_proxy(&clips, clip);
-        let clip = editable(&clips, clip);
+        let (clip, proxy) = ensure_local(&library, &clips, clip)?;
         requests.push(serde_json::json!({
             "clip": clip, "proxy": proxy, "overlay": overlay,
             "first_frame": first_frame, "frames": frames,
@@ -555,7 +554,8 @@ fn make_project(p: &Page, name: String, mut items: Vec<(String, PathBuf, PathBuf
     let tx = p.replies.clone();
     p.resolve_buttons.set_sensitive(false);
     p.resolve_status.remove_css_class("error");
-    p.resolve_status.set_text("Making the project in Resolve…");
+    p.resolve_status
+        .set_text("Making the project in Resolve (copying any clip only on the NAS here first)…");
     std::thread::spawn(move || {
         let bridge = crate::resolve::Bridge::new(container.as_deref());
         let result = create_project(&bridge, &name, &items).map_err(|e| format!("{e:#}"));
@@ -720,7 +720,6 @@ fn create_project(
             .and_then(|i| i.frames)
             .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
         let known = clips.iter().find(|c| &c.path == clip);
-        let proxy = ready_proxy(&clips, clip);
         if format.is_none() {
             let info = match known.and_then(|c| c.info.clone()) {
                 Some(i) => i,
@@ -728,7 +727,7 @@ fn create_project(
             };
             format = Some(info);
         }
-        let clip = editable(&clips, clip);
+        let (clip, proxy) = ensure_local(&library, &clips, clip)?;
         runs.push(serde_json::json!({
             "clip": clip, "proxy": proxy, "overlay": overlay,
             "first_frame": first_frame, "frames": frames,
@@ -752,13 +751,33 @@ fn create_project(
     Ok(describe_project(&reply))
 }
 
-/// The file Resolve should use for a clip: for an original on the NAS, its
-/// local copy while there is one.
-fn editable(clips: &[library::Clip], clip: &std::path::Path) -> PathBuf {
-    clips
-        .iter()
-        .find(|c| c.path == clip)
-        .map_or_else(|| clip.to_owned(), |c| c.editable().to_owned())
+/// The file Resolve should use for a clip, and its proxy: for an original on
+/// the NAS, its local copy, made now (with its proxy) if it has none yet.
+fn ensure_local(
+    library: &Library,
+    clips: &[library::Clip],
+    clip: &std::path::Path,
+) -> anyhow::Result<(PathBuf, Option<PathBuf>)> {
+    let roots = crate::library_page::roots();
+    let Some(known) = clips.iter().find(|c| c.path == clip) else {
+        return Ok((clip.to_owned(), None));
+    };
+    if !roots.on_nas(&known.path) {
+        return Ok((known.path.clone(), ready_proxy(clips, clip)));
+    }
+    if let Some(local) = known.local.as_ref().filter(|p| p.is_file()) {
+        return Ok((local.clone(), ready_proxy(clips, clip)));
+    }
+    let cancel = library::Cancel::default();
+    let local = library::hydrate::hydrate(known, &roots, &cancel, |_| {})?;
+    let proxy = known
+        .info
+        .as_ref()
+        .and_then(|info| library::proxy::make(&local, info, &cancel, |_| {}).ok());
+    let mut updated = known.clone();
+    library::scan::place(&mut updated, &roots);
+    library.upsert(&updated)?;
+    Ok((local, proxy))
 }
 
 /// The clip's proxy, if the library has one ready.

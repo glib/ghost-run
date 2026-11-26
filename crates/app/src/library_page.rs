@@ -43,6 +43,10 @@ enum Command {
     Proxies(Vec<(PathBuf, PathBuf, MediaInfo)>),
     /// Place markers in each clip (path, footage to read) from the best-matching course.
     AutoPlace(Vec<(PathBuf, PathBuf)>, Vec<Reference>),
+    /// Copy these NAS clips down to edit, with proxies.
+    Hydrate(Vec<Clip>, Roots),
+    /// Remove these NAS clips' local copies.
+    Dehydrate(Vec<Clip>, Roots),
 }
 
 struct BackupTo {
@@ -85,6 +89,8 @@ enum View {
     Untimed,
     /// No verified original on the NAS.
     NotOnNas,
+    /// NAS clips with a local copy.
+    Local,
     Course(String),
 }
 
@@ -112,6 +118,8 @@ struct State {
     journal_seen: Option<std::time::SystemTime>,
     /// The NAS footage root and local root as of the last scan.
     roots: Roots,
+    /// What the local copies of NAS clips take, in bytes.
+    local_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -124,6 +132,10 @@ struct Page {
     cancel: Cancel,
     banner: gtk::Box,
     banner_text: gtk::Label,
+    add_first: gtk::Button,
+    show_local: gtk::Button,
+    copy_here: gtk::Button,
+    remove_local: gtk::Button,
     counts: gtk::Label,
     status: gtk::Label,
     progress: gtk::ProgressBar,
@@ -200,8 +212,10 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     banner_text.set_wrap(true);
     banner_text.set_hexpand(true);
     let add_first = button("Add folder…");
+    let show_local = button("Show them");
     banner.append(&banner_text);
     banner.append(&add_first);
+    banner.append(&show_local);
     content.append(&banner);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -235,6 +249,14 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     move_course.set_tooltip_text(Some("Move the ticked clips' runs to another course"));
     let render = button("Render overlays");
     let to_resolve = crate::resolve_menu::menu();
+    let copy_here = button("Copy here");
+    copy_here.set_tooltip_text(Some(
+        "Copy the ticked clips from the NAS to this computer to edit, with proxies",
+    ));
+    let remove_local = button("Remove local copy");
+    remove_local.set_tooltip_text(Some(
+        "Remove the ticked clips' local copies and proxies; the originals stay on the NAS",
+    ));
     let untick = gtk::Button::from_icon_name("edit-clear-symbolic");
     untick.add_css_class("flat");
     untick.set_tooltip_text(Some("Untick all"));
@@ -245,6 +267,8 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         move_course.upcast_ref(),
         render.upcast_ref(),
         to_resolve.button.upcast_ref(),
+        copy_here.upcast_ref(),
+        remove_local.upcast_ref(),
         untick.upcast_ref(),
     ] {
         ticked_bar.append(w);
@@ -310,12 +334,17 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             backups: HashMap::new(),
             journal_seen: None,
             roots: Roots::default(),
+            local_bytes: 0,
         })),
         store: store.clone(),
         tx,
         cancel,
         banner,
         banner_text,
+        add_first: add_first.clone(),
+        show_local: show_local.clone(),
+        copy_here: copy_here.clone(),
+        remove_local: remove_local.clone(),
         counts,
         status,
         progress,
@@ -380,6 +409,16 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         p.shared.send_to_resolve(target, ids);
     });
     let p = page.clone();
+    copy_here.connect_clicked(move |_| start_hydrate(&p));
+    let p = page.clone();
+    remove_local.connect_clicked(move |_| confirm_dehydrate(&p));
+    let p = page.clone();
+    show_local.connect_clicked(move |_| {
+        p.state.borrow_mut().view = View::Local;
+        fill_courses(&p);
+        refill(&p);
+    });
+    let p = page.clone();
     untick.connect_clicked(move |_| {
         p.state.borrow_mut().selected.clear();
         refill(&p);
@@ -394,6 +433,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         let view = match name.as_str() {
             "untimed" => View::Untimed,
             "nas" => View::NotOnNas,
+            "local" => View::Local,
             n => match n.strip_prefix("course:") {
                 Some(id) => View::Course(id.to_owned()),
                 None => View::All,
@@ -756,6 +796,36 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     }
                     let _ = replies.send(Reply::Done(text));
                 }
+                Command::Hydrate(clips, roots) => {
+                    let text = hydrate(&library, &clips, &roots, &cancel, &replies);
+                    send_clips(&library);
+                    let _ = replies.send(Reply::Done(text));
+                }
+                Command::Dehydrate(clips, roots) => {
+                    let (mut freed, mut removed, mut failed) = (0u64, 0usize, Vec::new());
+                    for clip in &clips {
+                        match library::hydrate::dehydrate(clip, &roots) {
+                            Ok(bytes) => {
+                                freed += bytes;
+                                removed += 1;
+                                let mut clip = clip.clone();
+                                scan::place(&mut clip, &roots);
+                                let _ = library.upsert(&clip);
+                            }
+                            Err(e) => failed.push(format!("{}: {e:#}", clip.name())),
+                        }
+                    }
+                    send_clips(&library);
+                    let mut text = format!(
+                        "Removed {removed} local {} ({}).",
+                        plural(removed, "copy", "copies"),
+                        gb(freed)
+                    );
+                    if let Some(first) = failed.first() {
+                        text.push_str(&format!(" {} not removed: {first}", failed.len()));
+                    }
+                    let _ = replies.send(Reply::Done(text));
+                }
                 Command::AutoPlace(jobs, references) => {
                     let _ = replies.send(Reply::Done(auto_place(
                         &library,
@@ -933,6 +1003,7 @@ fn handle(p: &Page, reply: Reply) {
             let mut s = p.state.borrow_mut();
             let present: HashSet<&PathBuf> = clips.iter().map(|c| &c.path).collect();
             s.selected.retain(|path| present.contains(path));
+            s.local_bytes = library::hydrate::local_bytes(&clips, &s.roots);
             s.clips = clips;
             drop(s);
             fill_courses(p);
@@ -1071,12 +1142,35 @@ fn confirm_proxies(p: &Page) {
 fn refresh_controls(p: &Page) {
     let s = p.state.borrow();
     let no_folders = s.scanned.is_empty();
-    p.banner.set_visible(no_folders || s.runs_error.is_some());
-    p.banner_text.set_text(if no_folders {
-        "Add the folders your footage is in. Ghost Run lists every clip in them and keeps the list up to date."
+    let limit = p.shared.settings().local_copies_limit();
+    let too_big = s.local_bytes > limit;
+    p.banner
+        .set_visible(no_folders || s.runs_error.is_some() || too_big);
+    p.add_first.set_visible(no_folders);
+    p.show_local
+        .set_visible(!no_folders && s.runs_error.is_none() && too_big);
+    p.banner_text.set_text(&if no_folders {
+        "Add the folders your footage is in. Ghost Run lists every clip in them and keeps the list up to date.".to_owned()
+    } else if let Some(e) = &s.runs_error {
+        e.clone()
     } else {
-        s.runs_error.as_deref().unwrap_or("")
+        format!(
+            "Local copies of NAS clips take {}, more than the {} set in Settings. Remove the ones you're not editing: they can be copied down again any time.",
+            gb(s.local_bytes),
+            gb(limit)
+        )
     });
+    let ticked: Vec<&Clip> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path) && s.roots.on_nas(&c.path))
+        .collect();
+    p.copy_here.set_visible(!ticked.is_empty());
+    p.copy_here
+        .set_sensitive(!s.busy && s.roots.nas_online && ticked.iter().any(|c| c.local.is_none()));
+    p.remove_local.set_visible(!ticked.is_empty());
+    p.remove_local
+        .set_sensitive(!s.busy && ticked.iter().any(|c| c.local.is_some()));
     p.rescan.set_sensitive(!s.busy && !no_folders);
     p.proxies.set_sensitive(!s.busy && !s.clips.is_empty());
     p.time.set_sensitive(s.selected.len() == 1);
@@ -1123,7 +1217,7 @@ fn refill(p: &Page) {
         .clips
         .iter()
         .filter(|c| !s.only_missing || !matches!(c.proxy, ProxyState::Ready(_)))
-        .filter(|c| shown_in(&s.view, s.runs.get(&run_key(&c.path)), safe(&s, &c.path)))
+        .filter(|c| shows(&s, &s.view, c))
         .map(|c| glib::BoxedAnyObject::new(c.clone()))
         .collect();
     drop(s);
@@ -1450,15 +1544,145 @@ fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
         .collect()
 }
 
+/// Whether `clip` shows in `view`.
+fn shows(s: &State, view: &View, clip: &Clip) -> bool {
+    let local = s.roots.on_nas(&clip.path) && clip.local.is_some();
+    shown_in(
+        view,
+        s.runs.get(&run_key(&clip.path)),
+        safe(s, &clip.path),
+        local,
+    )
+}
+
 /// Whether a clip with this run (or none) shows in `view`.
-/// `safe`: its original is verified on the NAS.
-fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool) -> bool {
+/// `safe`: its original is verified on the NAS. `local`: it's a NAS clip with
+/// a local copy.
+fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool, local: bool) -> bool {
     match view {
         View::All => true,
         View::Untimed => run.is_none(),
         View::NotOnNas => !safe,
+        View::Local => local,
         View::Course(id) => run.is_some_and(|r| &r.course_id == id),
     }
+}
+
+/// Bytes as GB, one decimal.
+fn gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1e9)
+}
+
+/// Asks the worker to copy the ticked NAS clips down.
+fn start_hydrate(p: &Page) {
+    let s = p.state.borrow();
+    let clips: Vec<Clip> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path) && s.roots.on_nas(&c.path))
+        .filter(|c| c.local.is_none() && c.info.is_some())
+        .cloned()
+        .collect();
+    let roots = s.roots.clone();
+    drop(s);
+    if clips.is_empty() {
+        return;
+    }
+    p.state.borrow_mut().busy = true;
+    p.status.set_text("Copying from the NAS…");
+    p.progress.set_visible(true);
+    refresh_controls(p);
+    let _ = p.tx.send(Command::Hydrate(clips, roots));
+}
+
+/// Asks before removing the ticked clips' local copies.
+fn confirm_dehydrate(p: &Page) {
+    let s = p.state.borrow();
+    let clips: Vec<Clip> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path) && c.local.is_some())
+        .cloned()
+        .collect();
+    let roots = s.roots.clone();
+    let bytes = library::hydrate::local_bytes(&clips, &roots);
+    drop(s);
+    if clips.is_empty() {
+        return;
+    }
+    let body = format!(
+        "{} {}, {}. The originals stay on the NAS, and they can be copied down again any time. Rendered overlays are kept.",
+        clips.len(),
+        plural(clips.len(), "clip", "clips"),
+        gb(bytes)
+    );
+    let dialog = adw::AlertDialog::new(Some("Remove local copies?"), Some(&body));
+    dialog.add_responses(&[("cancel", "Cancel"), ("remove", "Remove")]);
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_close_response("cancel");
+    let p2 = p.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "remove" || p2.state.borrow().busy {
+            return;
+        }
+        p2.state.borrow_mut().busy = true;
+        refresh_controls(&p2);
+        let _ = p2.tx.send(Command::Dehydrate(clips.clone(), roots.clone()));
+    });
+    dialog.present(Some(&p.window));
+}
+
+/// Copies each clip down from the NAS, then makes its proxy; returns what
+/// happened.
+fn hydrate(
+    library: &Library,
+    clips: &[Clip],
+    roots: &Roots,
+    cancel: &Cancel,
+    replies: &mpsc::Sender<Reply>,
+) -> String {
+    let total = clips.len();
+    let (mut copied, mut failed) = (0usize, Vec::new());
+    for (i, clip) in clips.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let name = clip.name();
+        let status = |stage: &str, f: f64| {
+            let _ = replies.send(Reply::Status(
+                format!("{stage} {name} ({} of {total})", i + 1),
+                Some((i as f64 + f) / total as f64),
+            ));
+        };
+        let result = library::hydrate::hydrate(clip, roots, cancel, |f| {
+            status("Copying from the NAS:", f * 0.5)
+        })
+        .and_then(|local| {
+            let info = clip.info.as_ref().expect("filtered on info");
+            proxy::make(&local, info, cancel, |f| {
+                status("Making the proxy of", 0.5 + f * 0.5)
+            })
+        });
+        let mut updated = clip.clone();
+        scan::place(&mut updated, roots);
+        let _ = library.upsert(&updated);
+        match result {
+            Ok(_) => copied += 1,
+            Err(_) if cancel.load(Ordering::Relaxed) => break,
+            Err(e) => failed.push(format!("{name}: {e:#}")),
+        }
+    }
+    let mut text = format!(
+        "Copied {copied} {} here to edit.",
+        plural(copied, "clip", "clips")
+    );
+    if let Some(first) = failed.first() {
+        text.push_str(&format!(" {} failed: {first}", failed.len()));
+    }
+    if cancel.load(Ordering::Relaxed) {
+        text.push_str(" Stopped.");
+    }
+    text
 }
 
 /// "2:31.400 · 3rd", or just the lap for a run that isn't ranked.
@@ -1508,12 +1732,7 @@ fn ticked_runs(s: &State) -> Vec<String> {
 /// with how many clips are on it; keeps the selection.
 fn fill_courses(p: &Page) {
     let s = p.state.borrow();
-    let count = |view: &View| {
-        s.clips
-            .iter()
-            .filter(|c| shown_in(view, s.runs.get(&run_key(&c.path)), safe(&s, &c.path)))
-            .count()
-    };
+    let count = |view: &View| s.clips.iter().filter(|c| shows(&s, view, c)).count();
     let mut rows: Vec<(String, String, usize)> = vec![
         ("all".into(), "All clips".into(), s.clips.len()),
         (
@@ -1526,6 +1745,7 @@ fn fill_courses(p: &Page) {
             "Not on the NAS".into(),
             count(&View::NotOnNas),
         ),
+        ("local".into(), "Local copies".into(), count(&View::Local)),
     ];
     for (id, name) in &s.courses {
         rows.push((
@@ -1538,6 +1758,7 @@ fn fill_courses(p: &Page) {
         View::All => "all".to_owned(),
         View::Untimed => "untimed".to_owned(),
         View::NotOnNas => "nas".to_owned(),
+        View::Local => "local".to_owned(),
         View::Course(id) => format!("course:{id}"),
     };
     drop(s);
@@ -1798,14 +2019,21 @@ mod tests {
         // Ignored: its lap, no place.
         assert_eq!(lap_text(&runs["c.mp4"]), "0:08.000");
 
-        assert!(shown_in(&View::All, None, false));
-        assert!(shown_in(&View::Untimed, None, false));
-        assert!(!shown_in(&View::Untimed, Some(a), false));
-        assert!(shown_in(&View::Course("lw".into()), Some(a), false));
-        assert!(!shown_in(&View::Course("other".into()), Some(a), false));
-        assert!(!shown_in(&View::Course("lw".into()), None, false));
-        assert!(shown_in(&View::NotOnNas, Some(a), false));
-        assert!(!shown_in(&View::NotOnNas, None, true));
+        assert!(shown_in(&View::All, None, false, false));
+        assert!(shown_in(&View::Untimed, None, false, false));
+        assert!(!shown_in(&View::Untimed, Some(a), false, false));
+        assert!(shown_in(&View::Course("lw".into()), Some(a), false, false));
+        assert!(!shown_in(
+            &View::Course("other".into()),
+            Some(a),
+            false,
+            false
+        ));
+        assert!(!shown_in(&View::Course("lw".into()), None, false, false));
+        assert!(shown_in(&View::NotOnNas, Some(a), false, false));
+        assert!(!shown_in(&View::NotOnNas, None, true, false));
+        assert!(shown_in(&View::Local, None, true, true));
+        assert!(!shown_in(&View::Local, None, true, false));
     }
 
     #[test]
