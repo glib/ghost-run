@@ -1,6 +1,9 @@
 # 0005 — Workspaces for each job, footage kept on the NAS and hydrated to edit
 
-Status: accepted (2026-11-26)
+Status: accepted (2026-11-26). Revised the same day after first use: the
+import flow (local first, then the NAS, then dehydrate), a one-off tidy of the
+NAS and local footage instead of an Archive to NAS job, a video is a Resolve
+timeline, and the work in three stages.
 
 ## Context
 
@@ -64,9 +67,12 @@ Three tiers:
 | Catalog | library database, thumbnails and filmstrips, a ~540p preview for timing, auto-place's 64×36 frames, 16 kHz mono audio for suggestions | always local, ~2–3% of the originals |
 | Hydrated | editing copy (original video, PCM audio, which Resolve on Linux needs) and ProRes proxy | local, only while a video uses it |
 
-- **Import** copies card → NAS and verifies it. The catalog files are made in
-  the same pass, from the card, so the card is **safe to wipe** as soon as the
-  Inbox says so. No editing copy is made at import any more.
+- **Import** pulls the card to local disk, makes the catalog files, the
+  editing copy and the proxy there (fast, and off the card), copies each
+  original to the NAS and verifies it, then **dehydrates**: the local copies go
+  unless **Keep for editing** is on, for the whole import or the clips picked
+  (for a video started straight after the ride). The card is **safe to wipe**
+  once every original is verified on the NAS; a local copy alone never counts.
 - Timing, auto-place, finding the course, leaderboards, audio suggestions and
   overlay renders all work on the catalog alone: none of them need the
   full-size file (overlays need only the clip's size, rate and timecode).
@@ -80,8 +86,15 @@ Three tiers:
   NAS original are ever removed.
 - Ghost Run suggests dehydrating once hydrated footage passes **50 GB**
   (a setting).
-- Footage already on local disk shows as "local only" until an **Archive to
-  NAS** job copies it to the NAS layout, verified.
+- A clip counts as **on the NAS** when its file is under the footage root, as
+  catalogued, not only when the import journal copied it there.
+- Footage already on local disk (about 20 GB, much of it probably on the NAS
+  already) and the existing NAS folder (finished videos, inputs in
+  `video_in`, old branding, all mixed) are sorted out once by a Claude agent
+  on the desktop, which has the NAS mounted:
+  [`docs/agents/tidy-footage.md`](../agents/tidy-footage.md). It puts footage
+  in the layout below, matches local files to it, copies what's missing,
+  verified, and then clears the local copies. No Archive to NAS job is built.
 
 ### NAS layout
 
@@ -94,6 +107,11 @@ Three tiers:
 - Rides are named in the catalog, not in folder names, so naming or regrouping
   a ride never moves files on the NAS.
 - Earlier imports stay where they are and are read as before.
+- Beside the footage root, in the same share: `Exports/` (finished videos,
+  `YYYY-MM-DD Title.ext`), `Brand/` (logos, intro animations, music, fonts,
+  title templates), `Projects/` (Resolve project exports), `Other/`, and
+  `_review/` for whatever the tidy couldn't place. Ghost Run reads only the
+  footage root.
 
 ### Catalog
 
@@ -106,10 +124,12 @@ only Liam can say. New there:
 - **Collections**: hand-made groups across rides (a race build-up).
 - **Features**: a spot (a jump, a drop) rather than a stretch of trail, with
   attempts found the way auto-place finds runs, and a landed/crashed flag.
-- **Videos**: kind, input, status (planned → in Resolve → published, with
-  its link and date) and **usage**: the clip ranges in it, recorded when Ghost
-  Run builds it and again from the final Resolve timeline, so what was kept
-  counts.
+- **Videos**: a video is one Resolve timeline (the one rendered for
+  YouTube). Kind, input, status (planned → in Resolve → published, with its
+  link and date, typed in by hand) and **usage**: the clip ranges in it,
+  recorded when Ghost Run builds it and read back from the final timeline, so
+  what was kept counts. An existing timeline can be **linked** as a video, so
+  videos already published count their footage as released.
 - Import history: each clip's NAS path and verification.
 
 The catalog and the run database are backed up to the NAS
@@ -156,23 +176,50 @@ optimal lap, and an optional target time.
 
 ## Order of work
 
-Each is its own pull request (or a few), with an issue:
+Three stages. Each finishes a workflow end to end and is a few pull requests;
+Liam tries a stage as a whole rather than each piece.
 
-1. **Inbox** (#32): import straight to the NAS layout, catalog files from the card,
-   "safe to wipe", catalog backups.
-2. **Library** (#33): rides, tags, flags, collections, thumbnails, usage filters
-   (unused / in an unpublished project / released).
-3. **Videos (basic)** (#34): a video of chosen clips, hydrate and dehydrate, the
-   existing new-project bridge, usage read back from Resolve, published status.
-   Needs #18 (real Resolve) checked first.
-4. **Tracks** (#35): ridden-most order, PB trend, sector gaps, targets.
-5. **Video kinds** (#36): speed progression and trail first, then ridelog, gear
-   review, story, feature progression (with Features). Kinds with dissolves
-   wait on the `edit_check.py` result (0004).
-6. **Strava** (#37): match activities, course suggestions, segment times, stats.
-7. **Overlay styles** (#38): ghost comparison, PB chart card, attempt counter,
-   brand-kit title cards, vertical layouts.
-8. Retire the Python script (0003 step 9), when Liam is ready.
+**Stage A: all footage on the NAS, in the Library, imported the new way**
+(#32)
+
+1. The one-off tidy, run by Liam on the desktop
+   ([`docs/agents/tidy-footage.md`](../agents/tidy-footage.md)).
+2. The catalog: the Library lists every clip under the footage root,
+   NAS-only ones too, with thumbnails, the ~540p preview (timing reads it),
+   auto-place's frames and 16 kHz audio made locally; "on the NAS" means under
+   the footage root.
+3. Hydrate and dehydrate on clips: the editing copy and proxy at a fixed local
+   path, a hydrated-footage total, and the suggestion past 50 GB.
+4. The new import: card → local → catalog files, editing copy and proxy → NAS,
+   verified → dehydrate, with Keep for editing.
+5. Inbox, Library, Videos (empty until stage B), Tracks in the sidebar; a jobs
+   drawer instead of the Output page.
+6. After an import, the course found and markers placed as drafts, ending on
+   what needs checking, flagged by confidence (#6 tunes it).
+
+**Stage B: make a video, and know what's been used** (#34, #33, #36's first
+part)
+
+1. Videos: a video of chosen clips, hydrated and built in Resolve. Clips go in
+   as they are; overlays render only for the timed runs that want one (today
+   nothing reaches Resolve without one). Status, the YouTube link, usage read
+   from the final timeline, dehydrate on publishing.
+2. Link an existing Resolve timeline as a video.
+3. Library: rides, tags, flags, collections, and the unused / in a project /
+   released filters.
+4. The first two kinds: trail (no talking) and speed progression. Both are
+   cuts built through the bridge, so they don't wait on `edit_check.py`.
+
+**Stage C: richer videos** (#36's rest, #38, #37)
+
+1. Ridelog, gear review, story, feature progression (with Features).
+2. 0004's first edit (suggested sections, intro, padding) and thumbnails,
+   once `edit_check.py` has been tried in Resolve.
+3. Overlay styles: ghost comparison, PB chart card, attempt counter, brand-kit
+   title cards, vertical.
+4. Strava: activities matched to clips, course suggestions, segment times on
+   Tracks, stats for overlays.
+5. Retire the Python script (0003 step 9), when Liam is ready.
 
 ## Consequences
 
@@ -182,6 +229,10 @@ Each is its own pull request (or a few), with an issue:
   the protection. Synology snapshots of the footage folder would guard
   against deleting by mistake, at little cost.
 - Editing needs the NAS reachable to hydrate; everything else works without it.
+- Import ends with the footage dehydrated by default, so an edit started the
+  same day needs Keep for editing ticked (or a hydrate afterwards).
+- Ghost Run doesn't keep Resolve markers on a new project; they were only for
+  the old script, and overlays now come from stored runs.
 - The catalog has to be backed up, and a lost catalog loses names, tags and
   usage (not footage or runs).
 - The Library page becomes a view on the catalog, not a scan of local folders;
