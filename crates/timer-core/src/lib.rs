@@ -19,6 +19,7 @@ pub mod preview;
 pub mod py;
 pub mod stats;
 pub mod timing;
+pub mod tracks;
 pub mod validation;
 mod yaml;
 

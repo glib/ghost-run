@@ -15,7 +15,7 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         ),
         (
             "runs",
-            "Leaderboards",
+            "Tracks",
             "view-list-ordered-symbolic",
             crate::runs_page::page(&shared),
         ),

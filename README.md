@@ -35,13 +35,17 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   or a new project). Rendering and Resolve use the ticked clips' runs, so a
   clip has to be timed first. Courses are added and renamed in the Courses
   panel.
-- **Leaderboards**: a leaderboard per course from your run database (best lap,
-  optimal lap, sector times with the fastest highlighted). Tick runs to move
-  them to another course, ignore them, delete them, render their overlays or
-  send them to Resolve. Each change is saved at once, with a backup in
-  `timer_db.yaml.backups/`, and never over changes the Resolve script made
-  meanwhile.
-- **Output**: tick clips in the Library (or runs on Leaderboards) and press **Render overlays** (or
+- **Tracks**: your courses, the ones you've ridden most in the last eight
+  weeks first. For each: your personal best and how long it has stood, your
+  latest run against it, a target time to chase (**Target…**), a chart of
+  every counted run with your PB as a step line, and the sector where you've
+  lost most time lately against your fastest. Below it, the course's
+  leaderboard (best lap, optimal lap, sector times with the fastest
+  highlighted). Tick runs to move them to another course, ignore them, delete
+  them, render their overlays or send them to Resolve. Each change is saved at
+  once, with a backup in `timer_db.yaml.backups/`, and never over changes the
+  Resolve script made meanwhile.
+- **Output**: tick clips in the Library (or runs on Tracks) and press **Render overlays** (or
   **Add runs without overlays** here) to render each run's timer overlay: a
   transparent ProRes 4444 `.mov` with the clip's timecode, in an `Overlays`
   folder beside the clip (or the folder set in Settings). It compares each

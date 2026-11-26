@@ -10,6 +10,7 @@ mod settings_dialog;
 mod shared;
 mod shell;
 mod time_page;
+mod tracks_view;
 mod ui;
 
 use anyhow::{Context, Result};

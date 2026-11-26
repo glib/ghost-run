@@ -49,7 +49,8 @@ pub struct Library {
 }
 
 /// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
-const VERSION: u32 = 4;
+/// 5: course target times.
+const VERSION: u32 = 5;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -88,6 +89,10 @@ impl Library {
                confidence TEXT NOT NULL,
                source TEXT NOT NULL,
                updated_ms INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS course_targets (
+               course_id TEXT PRIMARY KEY,
+               seconds REAL NOT NULL
              );
              CREATE TABLE IF NOT EXISTS course_references (
                course_id TEXT PRIMARY KEY,
@@ -338,6 +343,33 @@ impl Library {
         Ok(())
     }
 
+    /// The lap time Liam is chasing on a course, if one is set (Tracks).
+    pub fn target(&self, course_id: &str) -> Result<Option<f64>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT seconds FROM course_targets WHERE course_id = ?1",
+                [course_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Sets (or with `None` clears) a course's target lap time.
+    pub fn set_target(&self, course_id: &str, seconds: Option<f64>) -> Result<()> {
+        match seconds {
+            Some(s) => self.db.execute(
+                "INSERT OR REPLACE INTO course_targets VALUES (?1, ?2)",
+                params![course_id, s],
+            )?,
+            None => self.db.execute(
+                "DELETE FROM course_targets WHERE course_id = ?1",
+                [course_id],
+            )?,
+        };
+        Ok(())
+    }
+
     /// Clips with a draft, so the Library can show them.
     pub fn drafted(&self) -> Result<std::collections::HashSet<PathBuf>> {
         let mut stmt = self.db.prepare("SELECT path FROM drafts")?;
@@ -452,6 +484,17 @@ mod tests {
         lib.set_reference("c", "run_1").unwrap();
         lib.set_reference("c", "run_2").unwrap();
         assert_eq!(lib.reference("c").unwrap().as_deref(), Some("run_2"));
+    }
+
+    #[test]
+    fn remembers_and_clears_course_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = Library::open(&dir.path().join("l.sqlite3")).unwrap();
+        assert_eq!(lib.target("c").unwrap(), None);
+        lib.set_target("c", Some(151.5)).unwrap();
+        assert_eq!(lib.target("c").unwrap(), Some(151.5));
+        lib.set_target("c", None).unwrap();
+        assert_eq!(lib.target("c").unwrap(), None);
     }
 
     #[test]

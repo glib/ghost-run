@@ -1,4 +1,4 @@
-//! The "Resolve ▾" button the Library and Leaderboards pages share: it sends
+//! The "Resolve ▾" button the Library and Tracks pages share: it sends
 //! the ticked runs to DaVinci Resolve, either onto the open timeline or into
 //! a new project (see [`crate::shared::Shared::send_to_resolve`]).
 
