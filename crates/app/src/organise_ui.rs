@@ -173,6 +173,57 @@ pub fn collection_dialog(shared: &Shared, names: Vec<String>, done: impl Fn(Stri
     );
 }
 
+/// Asks which video to add the ticked clips to: one of `videos` (id,
+/// title: the unpublished ones), or a new one with a title typed in. `done`
+/// gets the video's id, or none and the new title.
+pub fn video_dialog(
+    shared: &Shared,
+    clips: usize,
+    videos: Vec<(i64, String)>,
+    done: impl Fn(Option<i64>, String) + 'static,
+) {
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let mut choices: Vec<&str> = vec!["New video"];
+    choices.extend(videos.iter().map(|(_, t)| t.as_str()));
+    let pick = gtk::DropDown::from_strings(&choices);
+    pick.update_property(&[gtk::accessible::Property::Label("Video")]);
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Title, e.g. Ridge laps, November")
+        .activates_default(true)
+        .build();
+    entry.update_property(&[gtk::accessible::Property::Label("New video's title")]);
+    if !videos.is_empty() {
+        form.append(&pick);
+    }
+    form.append(&entry);
+    let e = entry.clone();
+    pick.connect_selected_notify(move |p| e.set_visible(p.selected() == 0));
+    let (pick2, entry2) = (pick.clone(), entry.clone());
+    crate::courses::ask(
+        shared,
+        "Add to a video",
+        &format!(
+            "The {clips} ticked {} go on the end, whole and in the order recorded. Timed runs get their timer; switch it off on the Videos page.",
+            if clips == 1 { "clip" } else { "clips" }
+        ),
+        "Add",
+        Some(form.upcast_ref()),
+        Some(entry.upcast_ref()),
+        move || match pick2.selected() {
+            0 => {
+                let title = entry2.text().trim().to_owned();
+                if !title.is_empty() {
+                    done(None, title);
+                }
+            }
+            i => {
+                let (id, title) = videos[i as usize - 1].clone();
+                done(Some(id), title);
+            }
+        },
+    );
+}
+
 /// Asks for a new name (an empty one is allowed when `clearable`, meaning
 /// "go back to the default"). With `delete`, a Delete button too.
 pub fn name_dialog(

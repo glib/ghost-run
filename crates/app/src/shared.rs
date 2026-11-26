@@ -23,6 +23,12 @@ pub enum Change {
     /// An import finished ([`Shared::imported`]): the Library rescans and
     /// places markers in the new clips.
     Imported,
+    /// A video was added, changed or built ([`Shared::videos_changed`]).
+    Videos,
+    /// A video was picked to build in Resolve ([`Shared::build_video`]).
+    BuildVideo,
+    /// Show the Videos page on a video ([`Shared::show_video`]).
+    ShowVideo,
 }
 
 /// Where runs sent to Resolve go.
@@ -54,6 +60,10 @@ pub struct Shared {
     to_resolve: Rc<RefCell<ToResolve>>,
     /// Originals just imported to the NAS, for the Library to take.
     imported: Rc<RefCell<Vec<std::path::PathBuf>>>,
+    /// The video to build, for the jobs drawer to take.
+    to_build: Rc<RefCell<Option<i64>>>,
+    /// The video to show, for the Videos page to take.
+    to_show: Rc<RefCell<Option<i64>>>,
 }
 
 impl Shared {
@@ -74,6 +84,8 @@ impl Shared {
             to_render: Rc::default(),
             to_resolve: Rc::default(),
             imported: Rc::default(),
+            to_build: Rc::default(),
+            to_show: Rc::default(),
         }
     }
 
@@ -134,6 +146,34 @@ impl Shared {
     /// The runs picked to go into Resolve, once.
     pub fn take_runs_for_resolve(&self) -> ToResolve {
         self.to_resolve.borrow_mut().take()
+    }
+
+    /// Tells the pages a video changed in the catalog.
+    pub fn videos_changed(&self) {
+        self.notify(Change::Videos);
+    }
+
+    /// Builds this video in Resolve (in the jobs drawer: overlays rendered,
+    /// clips copied down, then the project made).
+    pub fn build_video(&self, id: i64) {
+        *self.to_build.borrow_mut() = Some(id);
+        self.notify(Change::BuildVideo);
+    }
+
+    /// The video picked to build, once.
+    pub fn take_video_to_build(&self) -> Option<i64> {
+        self.to_build.borrow_mut().take()
+    }
+
+    /// Opens the Videos page on this video.
+    pub fn show_video(&self, id: i64) {
+        *self.to_show.borrow_mut() = Some(id);
+        self.notify(Change::ShowVideo);
+    }
+
+    /// The video to show, once.
+    pub fn take_video_to_show(&self) -> Option<i64> {
+        self.to_show.borrow_mut().take()
     }
 
     /// Tells the Library these originals were just imported to the NAS.
