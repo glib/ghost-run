@@ -8,9 +8,15 @@
 //!
 //! Clips are kept by key ([`crate::organise::key`]) and by path as last seen,
 //! so a video still finds a clip that moved on the NAS after a rescan.
+//!
+//! A timeline made by hand can be linked as a video: what the bridge reads
+//! from it is matched to catalogued clips ([`match_timeline`]). What clips
+//! are used by ([`clip_uses`]) drives the Library's Unused / In a video /
+//! Released views, and publishing offers to remove the local copies no
+//! unfinished video needs ([`freeable`]).
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
@@ -112,6 +118,142 @@ pub struct Use {
     pub clip: String,
     pub first_frame: i64,
     pub frames: i64,
+}
+
+/// A clip on a Resolve timeline, as the bridge reads it: the file, and the
+/// part of it used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnTimeline {
+    pub path: PathBuf,
+    pub first_frame: i64,
+    pub frames: i64,
+}
+
+/// Which catalogued clip each timeline item is (by path, its local copy's
+/// path, the same file under another spelling, or a file name only one clip
+/// has), as items in timeline order with no timer; and the names of the
+/// files that aren't in the catalog. Overlays are left out.
+pub fn match_timeline(clips: &[Clip], found: &[OnTimeline]) -> (Vec<Item>, Vec<String>) {
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    let (mut items, mut missing) = (Vec::new(), Vec::new());
+    for f in found {
+        let name = original_name(&f.path);
+        if name.ends_with(".overlay.mov") {
+            continue;
+        }
+        let here = canonical(&f.path);
+        let by_path = clips.iter().find(|c| {
+            c.path == f.path
+                || c.local.as_deref() == Some(f.path.as_path())
+                || (here.is_some()
+                    && [Some(c.path.as_path()), c.local.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|p| canonical(p) == here))
+        });
+        let by_name = || {
+            let mut named = clips.iter().filter(|c| original_name(&c.path) == name);
+            match (named.next(), named.next()) {
+                (Some(c), None) => Some(c),
+                _ => None,
+            }
+        };
+        match by_path.or_else(by_name) {
+            Some(c) => items.push(Item {
+                first_frame: f.first_frame,
+                frames: f.frames,
+                ..Item::whole(c)
+            }),
+            None => missing.push(
+                f.path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        }
+    }
+    (items, missing)
+}
+
+/// A file's name in lower case, an editing copy's (`clip.MP4.mov`) as its
+/// original's.
+fn original_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    match name.strip_suffix(".mov") {
+        Some(original) if original.contains('.') && !original.ends_with(".overlay") => {
+            original.to_owned()
+        }
+        _ => name,
+    }
+}
+
+/// Which kinds of video a clip is in.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Used {
+    /// In one not published yet (planned or in its usage).
+    pub unpublished: bool,
+    /// In a published one's final cut.
+    pub published: bool,
+}
+
+/// The clips a video counts as using: its items, and its usage, except that
+/// a published video with usage counts only that (its final cut).
+fn keys_of<'a>(v: &'a Video, usage: &'a HashMap<i64, Vec<Use>>) -> HashSet<&'a str> {
+    let used: HashSet<&str> = usage
+        .get(&v.id)
+        .into_iter()
+        .flatten()
+        .map(|u| u.clip.as_str())
+        .collect();
+    if v.status == Status::Published && !used.is_empty() {
+        return used;
+    }
+    used.into_iter()
+        .chain(v.items.iter().map(|i| i.clip.as_str()))
+        .collect()
+}
+
+/// Each clip key's videos, for the Library's views.
+pub fn clip_uses(videos: &[Video], usage: &HashMap<i64, Vec<Use>>) -> HashMap<String, Used> {
+    let mut out: HashMap<String, Used> = HashMap::new();
+    for v in videos {
+        for key in keys_of(v, usage) {
+            let e = out.entry(key.to_owned()).or_default();
+            if v.status == Status::Published {
+                e.published = true;
+            } else {
+                e.unpublished = true;
+            }
+        }
+    }
+    out
+}
+
+/// The clips of `video` (all it was made from) that no other unpublished
+/// video needs: their local copies can go once it's published.
+pub fn freeable(video: i64, videos: &[Video], usage: &HashMap<i64, Vec<Use>>) -> HashSet<String> {
+    let Some(v) = videos.iter().find(|v| v.id == video) else {
+        return HashSet::new();
+    };
+    let needed: HashSet<&str> = videos
+        .iter()
+        .filter(|o| o.id != video && o.status != Status::Published)
+        .flat_map(|o| keys_of(o, usage))
+        .collect();
+    usage
+        .get(&video)
+        .into_iter()
+        .flatten()
+        .map(|u| u.clip.as_str())
+        .chain(v.items.iter().map(|i| i.clip.as_str()))
+        .filter(|k| !needed.contains(k))
+        .map(str::to_owned)
+        .collect()
 }
 
 impl Library {
@@ -302,6 +444,17 @@ impl Library {
         Ok(())
     }
 
+    /// The videos whose usage was read back from their timeline.
+    pub fn read_back(&self) -> Result<HashSet<i64>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT DISTINCT video FROM video_usage WHERE source = 'timeline'")?;
+        let ids = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<HashSet<i64>>>()?;
+        Ok(ids)
+    }
+
     /// Each video's usage: what was read from its timeline if that's been
     /// done, else what was built.
     pub fn usage(&self) -> Result<HashMap<i64, Vec<Use>>> {
@@ -344,6 +497,98 @@ impl Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn clip(path: &str, local: Option<&str>) -> Clip {
+        Clip {
+            path: path.into(),
+            local: local.map(Into::into),
+            size: 7,
+            ..Clip::default()
+        }
+    }
+
+    #[test]
+    fn timeline_items_are_matched_to_catalogued_clips() {
+        let clips = [
+            clip("/nas/a/DJI_0001.MP4", Some("/edit/a/DJI_0001.MP4.mov")),
+            clip("/nas/a/DJI_0002.MP4", None),
+            clip("/nas/b/GX0003.MP4", None),
+            clip("/nas/c/GX0003.MP4", None),
+        ];
+        let on = |path: &str, first, frames| OnTimeline {
+            path: path.into(),
+            first_frame: first,
+            frames,
+        };
+        let (items, missing) = match_timeline(
+            &clips,
+            &[
+                on("/edit/a/DJI_0001.MP4.mov", 30, 200),
+                on("/var/home/me/nas/a/DJI_0002.MP4", 0, 90),
+                on("/edit/a/Overlays/DJI_0001.overlay.mov", 0, 200),
+                on("/somewhere/GX0003.MP4", 0, 10),
+                on("/edit/DJI_0001.MP4.mov", 300, 60),
+                on("/music/song.wav", 0, 10),
+            ],
+        );
+        let got: Vec<(&str, i64, i64)> = items
+            .iter()
+            .map(|i| (i.clip.as_str(), i.first_frame, i.frames))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("dji_0001.mp4.7", 30, 200),
+                ("dji_0002.mp4.7", 0, 90),
+                ("dji_0001.mp4.7", 300, 60)
+            ]
+        );
+        assert_eq!(items[0].path, PathBuf::from("/nas/a/DJI_0001.MP4"));
+        // Two clips share GX0003.MP4: not guessed.
+        assert_eq!(missing, ["GX0003.MP4", "song.wav"]);
+    }
+
+    #[test]
+    fn uses_and_what_publishing_frees() {
+        let video = |id, status, clips: &[&str]| Video {
+            id,
+            status,
+            items: clips.iter().map(|c| item(c, None)).collect(),
+            ..Video::default()
+        };
+        let videos = [
+            video(1, Status::Published, &["a", "b", "c"]),
+            video(2, Status::InResolve, &["c", "d"]),
+            video(3, Status::Published, &["e"]),
+        ];
+        // Video 1's final cut kept only a and b.
+        let usage = HashMap::from([(
+            1,
+            ["a", "b"]
+                .map(|c| Use {
+                    video: 1,
+                    clip: c.into(),
+                    first_frame: 0,
+                    frames: 10,
+                })
+                .to_vec(),
+        )]);
+        let uses = clip_uses(&videos, &usage);
+        assert_eq!(
+            uses["a"],
+            Used {
+                unpublished: false,
+                published: true
+            }
+        );
+        assert!(!uses["c"].published && uses["c"].unpublished);
+        assert!(uses["e"].published);
+        assert!(!uses.contains_key("z"));
+        let mut freed: Vec<String> = freeable(1, &videos, &usage).into_iter().collect();
+        freed.sort();
+        assert_eq!(freed, ["a", "b"]);
+        assert!(freeable(9, &videos, &usage).is_empty());
+    }
 
     fn item(clip: &str, timer: Option<&str>) -> Item {
         Item {

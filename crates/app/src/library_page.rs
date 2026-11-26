@@ -102,6 +102,12 @@ enum View {
     Drafts,
     Picks,
     Rejected,
+    /// In no video.
+    Unused,
+    /// In a video not published yet.
+    InVideo,
+    /// In a published video's final cut.
+    Released,
     Course(String),
     /// A ride, by its id ([`Ride::id`]).
     Ride(String),
@@ -143,6 +149,8 @@ struct State {
     scanning: bool,
     /// Tags, flags, collections, ride names.
     catalog: Catalog,
+    /// Clip key → the kinds of video it's in.
+    uses: HashMap<String, library::videos::Used>,
     rides: Vec<Ride>,
     /// Clip path → its thumbnail, once made.
     thumbs: HashMap<PathBuf, PathBuf>,
@@ -411,6 +419,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             rescan_wanted: false,
             scanning: false,
             catalog: Catalog::default(),
+            uses: HashMap::new(),
             rides: Vec::new(),
             thumbs: HashMap::new(),
             thumbs_asked: HashSet::new(),
@@ -524,6 +533,9 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             "drafts" => View::Drafts,
             "picks" => View::Picks,
             "rejected" => View::Rejected,
+            "unused" => View::Unused,
+            "invideo" => View::InVideo,
+            "released" => View::Released,
             n => view_named(n),
         };
         let mut s = p.state.borrow_mut();
@@ -591,6 +603,12 @@ fn library_view(shared: &Shared) -> gtk::Widget {
                     start_scan(&p);
                 }
                 return;
+            }
+            // The Videos page may have removed local copies.
+            Change::Videos => {
+                if let Ok(clips) = Library::open_default().and_then(|l| l.clips()) {
+                    p.state.borrow_mut().clips = clips;
+                }
             }
             _ => {}
         }
@@ -905,29 +923,9 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     let _ = replies.send(Reply::Done(text));
                 }
                 Command::Dehydrate(clips, roots) => {
-                    let (mut freed, mut removed, mut failed) = (0u64, 0usize, Vec::new());
-                    for clip in &clips {
-                        match library::hydrate::dehydrate(clip, &roots) {
-                            Ok(bytes) => {
-                                freed += bytes;
-                                removed += 1;
-                                let mut clip = clip.clone();
-                                scan::place(&mut clip, &roots);
-                                let _ = library.upsert(&clip);
-                            }
-                            Err(e) => failed.push(format!("{}: {e:#}", clip.name())),
-                        }
-                    }
+                    let removed = library::hydrate::remove_local_copies(&library, &clips, &roots);
                     send_clips(&library);
-                    let mut text = format!(
-                        "Removed {removed} local {} ({}).",
-                        plural(removed, "copy", "copies"),
-                        gb(freed)
-                    );
-                    if let Some(first) = failed.first() {
-                        text.push_str(&format!(" {} not removed: {first}", failed.len()));
-                    }
-                    let _ = replies.send(Reply::Done(text));
+                    let _ = replies.send(Reply::Done(removed.text()));
                 }
                 Command::AutoPlace(jobs, references) => {
                     let _ = replies.send(Reply::Done(auto_place(
@@ -1702,6 +1700,9 @@ fn load_runs(p: &Page) {
         .and_then(|l| l.catalog())
         .unwrap_or_default();
     s.rides = organise::rides(&s.clips, &s.catalog.ride_names);
+    s.uses = Library::open_default()
+        .and_then(|l| Ok(library::videos::clip_uses(&l.videos()?, &l.usage()?)))
+        .unwrap_or_default();
     let still_there = match &s.view {
         View::Ride(id) => s.rides.iter().any(|r| &r.id == id),
         View::Collection(id) => s.catalog.collections.iter().any(|c| c.id == *id),
@@ -1774,6 +1775,9 @@ fn shows(s: &State, view: &View, clip: &Clip) -> bool {
         View::Drafts => return s.drafted.contains_key(&clip.path),
         View::Picks => return s.catalog.flags.get(&key()) == Some(&Flag::Pick),
         View::Rejected => return s.catalog.flags.get(&key()) == Some(&Flag::Reject),
+        View::Unused => return !s.uses.contains_key(&key()),
+        View::InVideo => return s.uses.get(&key()).is_some_and(|u| u.unpublished),
+        View::Released => return s.uses.get(&key()).is_some_and(|u| u.published),
         View::Ride(id) => {
             return s
                 .rides
@@ -1820,6 +1824,9 @@ fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool, local: bool) -> bool
         View::Drafts
         | View::Picks
         | View::Rejected
+        | View::Unused
+        | View::InVideo
+        | View::Released
         | View::Ride(_)
         | View::Collection(_)
         | View::Tag(_) => false,
@@ -2012,6 +2019,13 @@ fn fill_courses(p: &Page) {
         ),
         ("picks".into(), "Picks".into(), count(&View::Picks)),
         ("rejected".into(), "Rejected".into(), count(&View::Rejected)),
+        (
+            "unused".into(),
+            "Not in a video".into(),
+            count(&View::Unused),
+        ),
+        ("invideo".into(), "In a video".into(), count(&View::InVideo)),
+        ("released".into(), "Released".into(), count(&View::Released)),
     ];
     let section =
         |rows: &mut Vec<(String, String, usize)>, title: &str, items: Vec<(View, String)>| {
@@ -2104,6 +2118,9 @@ fn view_key(view: &View) -> String {
         View::Drafts => "drafts".to_owned(),
         View::Picks => "picks".to_owned(),
         View::Rejected => "rejected".to_owned(),
+        View::Unused => "unused".to_owned(),
+        View::InVideo => "invideo".to_owned(),
+        View::Released => "released".to_owned(),
         View::Course(id) => format!("course:{id}"),
         View::Ride(id) => format!("ride:{id}"),
         View::Collection(id) => format!("collection:{id}"),
