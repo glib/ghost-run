@@ -6,14 +6,22 @@
 //! Resolve hands it to the jobs drawer (`Shared::build_video`), which renders
 //! the timers wanted, copies NAS clips down and makes the project.
 //!
-//! Clips are added from the Library (Organise → Add to video…).
+//! Clips are added from the Library (Organise → Add to video…), or a
+//! timeline made by hand is linked (Link open timeline: the bridge's
+//! `read_timeline`, matched with `videos::match_timeline`). Read back records
+//! what the final timeline uses; setting a video to Published reads it back
+//! if Resolve has it open, then offers to remove the local copies of its
+//! clips that no unfinished video needs (`videos::freeable`).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use adw::prelude::*;
-use library::videos::{Item, Status, Video};
+use anyhow::{Context, Result};
+use library::videos::{Item, OnTimeline, Status, Use, Video};
 use library::{Clip, Library};
 
 use crate::shared::{Change, Shared};
@@ -25,9 +33,26 @@ pub struct RunLabel {
     pub course: String,
 }
 
+/// What a bridge thread sends back.
+enum Reply {
+    /// Text for the footer; then reload.
+    Done(String),
+    /// A video linked: show it.
+    Linked(i64, String),
+    Error(String),
+    /// After publishing: the video's clips whose local copies can go, and
+    /// what the read-back said first.
+    Freeable(Vec<Clip>, String),
+}
+
 #[derive(Default)]
 struct State {
     videos: Vec<Video>,
+    usage: HashMap<i64, Vec<Use>>,
+    /// Videos whose usage was read from their timeline.
+    read_back: HashSet<i64>,
+    /// A bridge call is running.
+    busy: bool,
     selected: Option<i64>,
     /// Clip key → the clip as catalogued.
     clips: HashMap<String, Clip>,
@@ -43,6 +68,8 @@ struct Page {
     stack: gtk::Stack,
     detail: gtk::Box,
     status: gtk::Label,
+    link: gtk::Button,
+    replies: mpsc::Sender<Reply>,
     /// Set while the list is refilled, so its selection isn't taken as a click.
     filling: Rc<std::cell::Cell<bool>>,
 }
@@ -56,6 +83,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         "Start a video; add its clips from the Library (Organise → Add to video…)",
     ));
     header.pack_end(&new);
+    let link = gtk::Button::with_label("Link open timeline");
+    link.set_tooltip_text(Some(
+        "Make a video of the timeline open in Resolve, with the clips it uses",
+    ));
+    header.pack_end(&link);
     root.append(&header);
 
     let body = gtk::Box::new(gtk::Orientation::Horizontal, 18);
@@ -83,7 +115,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     empty.set_icon_name(Some("video-x-generic-symbolic"));
     empty.set_title("No videos yet");
     empty.set_description(Some(
-        "Tick clips in the Library and choose Organise → Add to video…, or start one here with New video….",
+        "Tick clips in the Library and choose Organise → Add to video…, start one here with New video…, or link a timeline you've made by hand: open it in Resolve and press Link open timeline.",
     ));
     stack.add_named(&empty, Some("empty"));
     let detail = gtk::Box::new(gtk::Orientation::Vertical, 18);
@@ -106,6 +138,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     footer.append(&status);
     root.append(&footer);
 
+    let (replies, rx) = mpsc::channel();
     let page = Page {
         shared: shared.clone(),
         state: Rc::default(),
@@ -113,8 +146,19 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         stack,
         detail,
         status,
+        link: link.clone(),
+        replies,
         filling: Rc::default(),
     };
+    let p = page.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
+        for reply in rx.try_iter() {
+            handle(&p, reply);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+    let p = page.clone();
+    link.connect_clicked(move |_| link_open_timeline(&p));
 
     let p = page.clone();
     list.connect_row_selected(move |_, row| {
@@ -167,7 +211,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
 /// Reads the videos, clips and runs again, and shows them.
 fn load(p: &Page) {
     let library = Library::open_default();
-    let (videos, clips) = match library.and_then(|l| Ok((l.videos()?, l.clips()?))) {
+    let read = library.and_then(|l| Ok((l.videos()?, l.clips()?, l.usage()?, l.read_back()?)));
+    let (videos, clips, usage, read_back) = match read {
         Ok(v) => v,
         Err(e) => {
             p.status
@@ -181,6 +226,8 @@ fn load(p: &Page) {
         .map(|c| (library::organise::key(&c), c))
         .collect();
     s.runs = runs(&p.shared);
+    s.usage = usage;
+    s.read_back = read_back;
     if !s
         .selected
         .is_some_and(|id| videos.iter().any(|v| v.id == id))
@@ -320,6 +367,7 @@ fn show(p: &Page) {
             .unwrap_or(0) as u32,
     );
     let pp = p.clone();
+    let was = video.status;
     status.connect_selected_notify(move |row| {
         let wanted = Status::ALL[row.selected() as usize];
         save(&pp, |v| {
@@ -328,6 +376,9 @@ fn show(p: &Page) {
             }
             v.status = wanted;
         });
+        if wanted == Status::Published && was != Status::Published {
+            published(&pp);
+        }
     });
     about.add(&status);
     let link = adw::EntryRow::new();
@@ -357,10 +408,30 @@ fn show(p: &Page) {
     about.add(&date);
     let resolve = adw::ActionRow::new();
     resolve.set_title("In Resolve");
-    resolve.set_subtitle(&match (&video.project, &video.timeline) {
-        (Some(project), Some(timeline)) => format!("Project {project}, timeline {timeline}"),
+    let used = s.usage.get(&video.id).map_or(0, |u| u.len());
+    resolve.set_subtitle(&glib_escape(&match (&video.project, &video.timeline) {
+        (Some(project), Some(timeline)) => format!(
+            "Project {project}, timeline {timeline} · {used} {} {}",
+            if used == 1 { "clip" } else { "clips" },
+            if s.read_back.contains(&video.id) {
+                "on the timeline when last read"
+            } else {
+                "as built"
+            }
+        ),
         _ => "Not built yet".to_owned(),
-    });
+    }));
+    if video.project.is_some() {
+        let read = gtk::Button::with_label("Read back");
+        read.set_valign(gtk::Align::Center);
+        read.set_sensitive(!s.busy);
+        read.set_tooltip_text(Some(
+            "Record which clips the timeline uses now (open its project in Resolve first)",
+        ));
+        let (pp, id) = (p.clone(), video.id);
+        read.connect_clicked(move |_| read_back(&pp, id, false));
+        resolve.add_suffix(&read);
+    }
     about.add(&resolve);
     p.detail.append(&about);
 
@@ -369,7 +440,7 @@ fn show(p: &Page) {
     group.set_description(Some(if video.items.is_empty() {
         "None yet: tick clips in the Library and choose Organise → Add to video…."
     } else {
-        "In this order, whole. Timer puts the run's overlay over its timed part. Trim in Resolve."
+        "In this order. Timer puts the run's overlay over its timed part. Trim in Resolve."
     }));
     let count = video.items.len();
     for (index, item) in video.items.iter().enumerate() {
@@ -479,6 +550,279 @@ fn show(p: &Page) {
             }
         });
         dialog.present(Some(&pp.shared.window));
+    });
+}
+
+/// Runs `job` on a thread with the Resolve bridge; its reply comes back to
+/// [`handle`].
+fn with_bridge(
+    p: &Page,
+    doing: &str,
+    job: impl FnOnce(&crate::resolve::Bridge) -> Reply + Send + 'static,
+) {
+    if std::mem::replace(&mut p.state.borrow_mut().busy, true) {
+        return;
+    }
+    p.link.set_sensitive(false);
+    p.status.set_text(doing);
+    show(p);
+    let container = p.shared.settings().resolve_container.clone();
+    let tx = p.replies.clone();
+    std::thread::spawn(move || {
+        let bridge = crate::resolve::Bridge::new(container.as_deref());
+        let _ = tx.send(job(&bridge));
+    });
+}
+
+fn handle(p: &Page, reply: Reply) {
+    p.state.borrow_mut().busy = false;
+    p.link.set_sensitive(true);
+    match reply {
+        Reply::Done(text) => p.status.set_text(&text),
+        Reply::Linked(id, text) => {
+            p.status.set_text(&text);
+            p.state.borrow_mut().selected = Some(id);
+        }
+        Reply::Error(text) => p.status.set_text(&text),
+        Reply::Freeable(clips, note) => {
+            p.status.set_text(&note);
+            if !clips.is_empty() {
+                offer_to_free(p, clips, note);
+            }
+        }
+    }
+    p.shared.videos_changed();
+}
+
+/// What the bridge reads from a timeline: project, timeline, the clips on it.
+fn read_timeline(
+    bridge: &crate::resolve::Bridge,
+    project: Option<&str>,
+    timeline: Option<&str>,
+) -> Result<(String, String, Vec<OnTimeline>)> {
+    let reply = bridge.request(&serde_json::json!({
+        "command": "read_timeline",
+        "project": project,
+        "timeline": timeline,
+    }))?;
+    let found = reply["items"]
+        .as_array()
+        .context("Resolve's reply had no items")?
+        .iter()
+        .filter_map(|i| {
+            Some(OnTimeline {
+                path: i["path"].as_str()?.into(),
+                first_frame: i["first_frame"].as_i64()?,
+                frames: i["frames"].as_i64()?,
+            })
+        })
+        .collect();
+    Ok((
+        reply["project"].as_str().unwrap_or_default().to_owned(),
+        reply["timeline"].as_str().unwrap_or_default().to_owned(),
+        found,
+    ))
+}
+
+/// Reads `video`'s timeline and records what it uses; returns a sentence.
+fn record_timeline(bridge: &crate::resolve::Bridge, video: i64) -> Result<String> {
+    let library = Library::open_default()?;
+    let v = library
+        .video(video)?
+        .context("that video isn't in the catalog any more")?;
+    let (_, _, found) = read_timeline(bridge, v.project.as_deref(), v.timeline.as_deref())?;
+    let (items, missing) = library::videos::match_timeline(&library.clips()?, &found);
+    let uses: Vec<Use> = items
+        .iter()
+        .map(|i| Use {
+            video,
+            clip: i.clip.clone(),
+            first_frame: i.first_frame,
+            frames: i.frames,
+        })
+        .collect();
+    library.set_usage(video, "timeline", &uses)?;
+    Ok(format!(
+        "Read {}: {} {} from the Library{}.",
+        v.timeline.as_deref().unwrap_or("its timeline"),
+        uses.len(),
+        if uses.len() == 1 { "clip" } else { "clips" },
+        missing_text(&missing)
+    ))
+}
+
+fn missing_text(missing: &[String]) -> String {
+    match missing {
+        [] => String::new(),
+        [one] => format!(", and {one}, which isn't in it"),
+        [first, rest @ ..] => format!(
+            ", and {} files that aren't in it ({first}…)",
+            rest.len() + 1
+        ),
+    }
+}
+
+/// Read back: what `video`'s timeline uses now. With `then_free`, after it
+/// is published: then the local copies it alone needed.
+fn read_back(p: &Page, video: i64, then_free: bool) {
+    let roots = crate::library_page::roots();
+    with_bridge(p, "Reading the timeline in Resolve…", move |bridge| {
+        let read = record_timeline(bridge, video);
+        if !then_free {
+            return match read {
+                Ok(text) => Reply::Done(text),
+                Err(e) => Reply::Error(format!("Not read: {e:#}")),
+            };
+        }
+        let note = match read {
+            Ok(text) => text,
+            Err(e) => format!("Its timeline wasn't read ({e:#}), so this goes by what was built."),
+        };
+        match freeable_clips(video, &roots) {
+            Ok(clips) => Reply::Freeable(clips, note),
+            Err(e) => Reply::Error(format!("{note} {e:#}")),
+        }
+    });
+}
+
+/// Once a video is published: read its timeline back if it has one, then
+/// offer to free its clips' local copies.
+fn published(p: &Page) {
+    let s = p.state.borrow();
+    let Some(video) = s.videos.iter().find(|v| Some(v.id) == s.selected).cloned() else {
+        return;
+    };
+    drop(s);
+    if video.project.is_some() {
+        read_back(p, video.id, true);
+        return;
+    }
+    match freeable_clips(video.id, &crate::library_page::roots()) {
+        Ok(clips) if !clips.is_empty() => offer_to_free(p, clips, String::new()),
+        Ok(_) => {}
+        Err(e) => p.status.set_text(&format!("{e:#}")),
+    }
+}
+
+/// `video`'s clips that no unfinished video needs and that have a local copy
+/// of a NAS original here.
+fn freeable_clips(video: i64, roots: &library::footage::Roots) -> Result<Vec<Clip>> {
+    let library = Library::open_default()?;
+    let keys = library::videos::freeable(video, &library.videos()?, &library.usage()?);
+    Ok(library
+        .clips()?
+        .into_iter()
+        .filter(|c| keys.contains(&library::organise::key(c)))
+        .filter(|c| roots.on_nas(&c.path) && c.local.as_ref().is_some_and(|l| l.is_file()))
+        .collect())
+}
+
+/// Asks whether to remove these clips' local copies.
+fn offer_to_free(p: &Page, clips: Vec<Clip>, note: String) {
+    let roots = crate::library_page::roots();
+    let bytes = library::hydrate::local_bytes(&clips, &roots);
+    let n = clips.len();
+    let dialog = adw::AlertDialog::new(
+        Some("Remove the local copies?"),
+        Some(&format!(
+            "{}{} here ({}) that no unfinished video needs. The originals stay on the NAS; Copy here in the Library brings them back.",
+            if note.is_empty() {
+                String::new()
+            } else {
+                format!("{note}\n\n")
+            },
+            if n == 1 {
+                "One of this video's clips has a local copy".to_owned()
+            } else {
+                format!("{n} of this video's clips have local copies")
+            },
+            library::hydrate::size_text(bytes)
+        )),
+    );
+    dialog.add_responses(&[("keep", "Keep them"), ("remove", "Remove")]);
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_close_response("keep");
+    let p2 = p.clone();
+    dialog.connect_response(None, move |_, r| {
+        if r != "remove" {
+            return;
+        }
+        let (clips, roots) = (clips.clone(), roots.clone());
+        p2.state.borrow_mut().busy = true;
+        p2.status.set_text("Removing local copies…");
+        let tx = p2.replies.clone();
+        std::thread::spawn(move || {
+            let reply = match Library::open_default() {
+                Ok(l) => {
+                    Reply::Done(library::hydrate::remove_local_copies(&l, &clips, &roots).text())
+                }
+                Err(e) => Reply::Error(format!("Not removed: {e:#}")),
+            };
+            let _ = tx.send(reply);
+        });
+    });
+    dialog.present(Some(&p.shared.window));
+}
+
+/// Makes a video of the timeline open in Resolve (or brings an existing
+/// video of it up to date), with the clips it uses.
+fn link_open_timeline(p: &Page) {
+    with_bridge(p, "Reading the open timeline in Resolve…", |bridge| {
+        let linked = (|| -> Result<(i64, String)> {
+            let (project, timeline, found) = read_timeline(bridge, None, None)?;
+            let library = Library::open_default()?;
+            let (items, missing) = library::videos::match_timeline(&library.clips()?, &found);
+            let existing = library.videos()?.into_iter().find(|v| {
+                v.project.as_deref() == Some(project.as_str())
+                    && v.timeline.as_deref() == Some(timeline.as_str())
+            });
+            let mut video = match existing {
+                Some(v) => v,
+                None => {
+                    let id = library.new_video(&timeline, "clips")?;
+                    library.video(id)?.context("the new video went missing")?
+                }
+            };
+            video.project = Some(project.clone());
+            video.timeline = Some(timeline.clone());
+            if video.status == Status::Planned {
+                video.status = Status::InResolve;
+            }
+            library.save_video(&video)?;
+            if video.items.is_empty() {
+                // Each clip once, in the order first used.
+                let mut seen = HashSet::new();
+                let firsts: Vec<Item> = items
+                    .iter()
+                    .filter(|i| seen.insert(i.clip.clone()))
+                    .cloned()
+                    .collect();
+                library.set_items(video.id, &firsts)?;
+            }
+            let uses: Vec<Use> = items
+                .iter()
+                .map(|i| Use {
+                    video: video.id,
+                    clip: i.clip.clone(),
+                    first_frame: i.first_frame,
+                    frames: i.frames,
+                })
+                .collect();
+            library.set_usage(video.id, "timeline", &uses)?;
+            Ok((
+                video.id,
+                format!(
+                    "Linked {timeline} in {project}: {} {} from the Library{}.",
+                    uses.len(),
+                    if uses.len() == 1 { "clip" } else { "clips" },
+                    missing_text(&missing)
+                ),
+            ))
+        })();
+        match linked {
+            Ok((id, text)) => Reply::Linked(id, text),
+            Err(e) => Reply::Error(format!("Not linked: {e:#}")),
+        }
     });
 }
 

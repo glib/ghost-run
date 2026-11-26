@@ -15,6 +15,11 @@ Requests:
   {"command": "new_project", "name": text, "fps": "29.97", "width": n, "height": n,
    "runs": [{"clip": path, "proxy": path or null, "overlay": path or null,
              "first_frame": n, "frames": n}, ...]}
+  {"command": "read_timeline", "project": name or null, "timeline": name or null}
+    The clips on a timeline of the open project (the current one if no name):
+    {"project", "timeline", "items": [{"path", "track", "record",
+    "first_frame", "frames"}, ...]} in timeline order. Refused when another
+    project is open than the one named, rather than switching projects.
 
 Replies are {"ok": true, ...} or {"ok": false, "error": code, "message": text}.
 
@@ -386,9 +391,57 @@ def new_project(resolve, request):
             "notes": notes}
 
 
+def find_timeline(project, name):
+    """The project's timeline called `name`, or its current one."""
+    if not name:
+        return project.GetCurrentTimeline()
+    for index in range(1, int(project.GetTimelineCount() or 0) + 1):
+        timeline = project.GetTimelineByIndex(index)
+        if timeline is not None and timeline.GetName() == name:
+            return timeline
+    return None
+
+
+def read_timeline(resolve, request):
+    project = current_project(resolve)
+    wanted = request.get("project")
+    if wanted and project.GetName() != wanted:
+        raise BridgeError(
+            "other_project",
+            "Open the project %s in Resolve first (%s is open)." % (wanted, project.GetName()),
+        )
+    timeline = find_timeline(project, request.get("timeline"))
+    if timeline is None:
+        if request.get("timeline"):
+            raise BridgeError(
+                "no_timeline",
+                "%s has no timeline called %s any more." % (project.GetName(), request["timeline"]),
+            )
+        raise BridgeError("no_timeline", "No timeline is open in Resolve.")
+    items = []
+    for track, item in timeline_items(timeline):
+        path = item_path(item)
+        if not path:
+            continue
+        start, end = int(item.GetStart()), int(item.GetEnd())
+        items.append({
+            "path": path,
+            "track": track,
+            "record": start,
+            "first_frame": int(item.GetLeftOffset()),
+            "frames": end - start,
+        })
+    items.sort(key=lambda i: (i["record"], i["track"]))
+    return {"ok": True, "project": project.GetName(), "timeline": timeline.GetName(),
+            "items": items}
+
+
+COMMANDS = ("status", "add_overlays", "new_project", "read_timeline")
+
+
 def handle(request, resolve_factory=connect):
     command = request.get("command")
-    if command not in ("status", "add_overlays", "new_project"):
+    if command not in COMMANDS:
         return {"ok": False, "error": "bad_request", "message": "unknown command %r" % command}
     try:
         resolve = resolve_factory()
@@ -396,6 +449,8 @@ def handle(request, resolve_factory=connect):
             return status(resolve)
         if command == "new_project":
             return new_project(resolve, request)
+        if command == "read_timeline":
+            return read_timeline(resolve, request)
         return add_overlays(resolve, request.get("items", []))
     except BridgeError as e:
         return {"ok": False, "error": e.code, "message": e.message}

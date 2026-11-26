@@ -108,6 +108,59 @@ pub fn dehydrate(clip: &Clip, roots: &Roots) -> Result<u64> {
     Ok(freed)
 }
 
+/// What [`remove_local_copies`] did.
+#[derive(Debug, Default)]
+pub struct Removed {
+    pub removed: usize,
+    pub freed: u64,
+    /// Each clip not removed, and why.
+    pub failed: Vec<String>,
+}
+
+impl Removed {
+    pub fn text(&self) -> String {
+        let mut text = format!(
+            "Removed {} local {} ({}).",
+            self.removed,
+            if self.removed == 1 { "copy" } else { "copies" },
+            size_text(self.freed)
+        );
+        if let Some(first) = self.failed.first() {
+            text.push_str(&format!(" {} not removed: {first}", self.failed.len()));
+        }
+        text
+    }
+}
+
+/// Bytes as GB with one decimal, or MB under 1 GB.
+pub fn size_text(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes as f64 / 1e9)
+    } else {
+        format!("{} MB", bytes.div_ceil(1_000_000))
+    }
+}
+
+/// [`dehydrate`]s each clip, saving where it is now in the catalog.
+pub fn remove_local_copies(library: &crate::Library, clips: &[Clip], roots: &Roots) -> Removed {
+    let mut out = Removed::default();
+    for clip in clips {
+        match dehydrate(clip, roots) {
+            Ok(bytes) => {
+                out.freed += bytes;
+                out.removed += 1;
+                let mut clip = clip.clone();
+                crate::scan::place(&mut clip, roots);
+                if let Err(e) = library.upsert(&clip) {
+                    out.failed.push(format!("{}: {e:#}", clip.name()));
+                }
+            }
+            Err(e) => out.failed.push(format!("{}: {e:#}", clip.name())),
+        }
+    }
+    out
+}
+
 /// What [`settle`] did with a newly imported clip's local copy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Settled {

@@ -142,6 +142,15 @@ class FakeProject:
     def GetCurrentTimeline(self):
         return self.timeline
 
+    def GetTimelineCount(self):
+        return len(self.timelines())
+
+    def GetTimelineByIndex(self, index):
+        return self.timelines()[index - 1]
+
+    def timelines(self):
+        return [t for t in [self.timeline] + getattr(self, "others", []) if t is not None]
+
     def GetMediaPool(self):
         return self.pool
 
@@ -323,6 +332,48 @@ class AddOverlaysTests(unittest.TestCase):
                 os.environ["RESOLVE_SCRIPT_API"] = old
         self.assertFalse(reply["ok"])
         self.assertIn(reply["error"], ("not_installed", "not_running"))
+
+
+class ReadTimelineTests(unittest.TestCase):
+    def setUp(self):
+        a = FakeMediaPoolItem("/edit/DJI_0001.MP4.mov")
+        overlay = FakeMediaPoolItem("/edit/Overlays/DJI_0001.overlay.mov")
+        b = FakeMediaPoolItem("/nas/DJI_0002.MP4")
+        title = FakeItem(None, 0, 50, 0)  # a generator: no media
+        self.timeline = FakeTimeline([
+            [title, FakeItem(b, 250, 400, 10), FakeItem(a, 50, 250, 30)],
+            [FakeItem(overlay, 50, 250, 0)],
+        ], name="Final")
+        self.project = FakeProject(self.timeline, name="Ridge laps")
+        self.project.others = [FakeTimeline([], name="Rough")]
+        self.resolve = FakeResolve(self.project)
+
+    def read(self, **request):
+        return bridge.handle(dict(command="read_timeline", **request), lambda: self.resolve)
+
+    def test_lists_the_clips_in_timeline_order(self):
+        reply = self.read()
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual((reply["project"], reply["timeline"]), ("Ridge laps", "Final"))
+        self.assertEqual(
+            [(i["path"], i["track"], i["record"], i["first_frame"], i["frames"])
+             for i in reply["items"]],
+            [("/edit/DJI_0001.MP4.mov", 1, 50, 30, 200),
+             ("/edit/Overlays/DJI_0001.overlay.mov", 2, 50, 0, 200),
+             ("/nas/DJI_0002.MP4", 1, 250, 10, 150)],
+        )
+
+    def test_a_named_timeline_in_the_open_project(self):
+        reply = self.read(project="Ridge laps", timeline="Rough")
+        self.assertEqual((reply["timeline"], reply["items"]), ("Rough", []))
+        reply = self.read(project="Ridge laps", timeline="Gone")
+        self.assertEqual(reply["error"], "no_timeline")
+
+    def test_another_project_open_is_refused_not_switched(self):
+        reply = self.read(project="Whistler", timeline="Final")
+        self.assertEqual(reply["error"], "other_project")
+        self.assertIn("Open the project Whistler", reply["message"])
+        self.assertIs(self.resolve.project, self.project)
 
 
 class NewProjectTests(unittest.TestCase):
