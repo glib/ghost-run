@@ -450,3 +450,40 @@ async fn imports_land_in_the_recording_day_and_a_second_import_never_overwrites(
         assert_eq!(fs::read(archive.join(p)).unwrap(), b"camera bytes");
     }
 }
+
+#[tokio::test]
+async fn verified_originals_can_be_listed_while_the_journal_is_open() {
+    let f = Fixture::new();
+    let name = "DJI_20260826184226_0027_D.MP4";
+    fs::write(f.settings.source.join(name), b"camera bytes").unwrap();
+    let dir = f.dir.path().join("jobs");
+    assert!(ingest::jobs::archived(&dir).unwrap().is_empty());
+    let mut jobs = Jobs::open(&dir).unwrap();
+    let mut b = ingest::pipeline::plan(
+        f.settings.clone(),
+        vec![f.candidate(name)],
+        &Cancel::default(),
+    )
+    .await
+    .unwrap();
+    // Planned, not run: nothing is verified yet.
+    jobs.save(&b).unwrap();
+    assert!(ingest::jobs::archived(&dir).unwrap().is_empty());
+    ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &events())
+        .await
+        .unwrap();
+    // The Import page keeps `jobs` (and its lock) open; listing still works.
+    let archived = ingest::jobs::archived(&dir).unwrap();
+    assert_eq!(archived.len(), 1);
+    assert_eq!(
+        archived[0].original,
+        f.settings
+            .archive
+            .as_ref()
+            .unwrap()
+            .path
+            .join(format!("2026/2026-08-26/{name}"))
+    );
+    assert_eq!(archived[0].editing, None);
+    assert!(b.safe_to_wipe());
+}

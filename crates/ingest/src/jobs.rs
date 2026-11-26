@@ -170,3 +170,61 @@ fn batch_header(b: &Batch) -> Batch {
         storage_notes: b.storage_notes.clone(),
     }
 }
+
+/// An original the journal has verified in the archive, and its editing copy
+/// if that was verified too. Absolute paths, as the batch's locations were
+/// set when it ran.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Archived {
+    pub original: std::path::PathBuf,
+    pub editing: Option<std::path::PathBuf>,
+    /// When the archive copy was last checked against the source.
+    pub verified_at: String,
+}
+
+/// Every verified original in the journal in `dir`, read without taking the
+/// application lock (the Import page holds it while open): read-only, so it
+/// never changes the journal. A missing journal has none.
+pub fn archived(dir: &Path) -> Result<Vec<Archived>> {
+    use crate::model::{Item, Stage};
+    let path = dir.join("jobs.sqlite3");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let db = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let mut headers = db.prepare("SELECT id, manifest FROM batches")?;
+    let batches: Vec<(String, String)> = headers
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut items = db.prepare("SELECT manifest FROM batch_items WHERE batch_id=?1")?;
+    let mut out = Vec::new();
+    for (id, header) in batches {
+        let batch: Batch = serde_json::from_str(&header)?;
+        let Some(archive) = &batch.settings.archive else {
+            continue;
+        };
+        let rows: Vec<String> = items
+            .query_map([&id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for row in rows {
+            let item: Item = serde_json::from_str(&row)?;
+            let Some(evidence) = &item.archive_evidence else {
+                continue;
+            };
+            if item.archive != Stage::Verified {
+                continue;
+            }
+            let editing = match (&item.editing, &item.editing_path, &batch.settings.editing) {
+                (Stage::Verified, Some(p), Some(e)) => Some(e.path.join(p)),
+                _ => None,
+            };
+            out.push(Archived {
+                original: archive.path.join(&item.archive_path),
+                editing,
+                verified_at: evidence.checked_at.clone(),
+            });
+        }
+    }
+    Ok(out)
+}

@@ -178,6 +178,16 @@ impl Batch {
             done as f64 / total as f64
         }
     }
+    /// Whether the card can be wiped: an import whose every selected original
+    /// is verified in the archive. Files left unselected aren't archived.
+    pub fn safe_to_wipe(&self) -> bool {
+        self.settings.workflow == crate::settings::Workflow::Ingest
+            && !self.items.is_empty()
+            && self
+                .items
+                .iter()
+                .all(|i| i.archive == Stage::Verified && i.archive_evidence.is_some())
+    }
     pub fn summary(&self) -> String {
         let clips = self
             .items

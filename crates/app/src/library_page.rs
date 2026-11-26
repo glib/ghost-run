@@ -18,6 +18,7 @@ use std::time::Duration;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use library::auto::{self, Reference};
+use library::backup::Backup;
 use library::scan::{self, Progress};
 use library::{Cancel, Clip, Draft, Library, MediaInfo, ProxyState, proxy};
 use timer_core::board::course_board;
@@ -39,6 +40,8 @@ enum Reply {
     Making(PathBuf),
     /// A clip's proxy is finished (made or not).
     Made(PathBuf),
+    /// Whether each clip's original is on the NAS, after a scan.
+    Backups(HashMap<PathBuf, Backup>),
     Done(String),
     Error(String),
 }
@@ -61,6 +64,8 @@ enum View {
     All,
     /// No stored run yet (drafts included).
     Untimed,
+    /// No verified original on the NAS.
+    NotOnNas,
     Course(String),
 }
 
@@ -81,6 +86,11 @@ struct State {
     queued: HashSet<PathBuf>,
     busy: bool,
     only_missing: bool,
+    /// Whether each clip's original is on the NAS (from the import journal).
+    backups: HashMap<PathBuf, Backup>,
+    /// The import journal's last change when the Library last scanned, so
+    /// coming back after an import rescans.
+    journal_seen: Option<std::time::SystemTime>,
 }
 
 #[derive(Clone)]
@@ -276,6 +286,8 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             queued: HashSet::new(),
             busy: false,
             only_missing: false,
+            backups: HashMap::new(),
+            journal_seen: None,
         })),
         store: store.clone(),
         tx,
@@ -359,6 +371,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         let name = row.widget_name();
         let view = match name.as_str() {
             "untimed" => View::Untimed,
+            "nas" => View::NotOnNas,
             n => match n.strip_prefix("course:") {
                 Some(id) => View::Course(id.to_owned()),
                 None => View::All,
@@ -420,7 +433,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         load_runs(&p);
         fill_courses(&p);
         refill(&p);
-        let folders = p.shared.settings().footage_folders.clone();
+        let folders = scan_folders(&p.shared);
         if change == Change::Settings && folders != p.state.borrow().scanned {
             start_scan(&p);
         }
@@ -447,9 +460,17 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             .set_text(&format!("Library could not be opened: {e:#}")),
     }
     refill(&page);
-    if !shared.settings().footage_folders.is_empty() {
+    if !scan_folders(shared).is_empty() {
         start_scan(&page);
     }
+    // Back on the Library after an import: rescan, so the new clips show.
+    let p = page.clone();
+    root.connect_map(move |_| {
+        let changed = journal_changed();
+        if changed.is_some() && changed != p.state.borrow().journal_seen {
+            start_scan(&p);
+        }
+    });
     root.upcast()
 }
 
@@ -565,6 +586,9 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                         let _ = replies.send(Reply::Status(text, None));
                     });
                     send_clips(&library);
+                    if let Ok(clips) = library.clips() {
+                        let _ = replies.send(Reply::Backups(backups(&clips)));
+                    }
                     let _ = replies.send(match result {
                         Ok(r) if cancel.load(Ordering::Relaxed) => {
                             Reply::Done(format!("Scan stopped after {} clips.", r.probed))
@@ -771,6 +795,11 @@ fn handle(p: &Page, reply: Reply) {
             fill_courses(p);
             refill(p);
         }
+        Reply::Backups(backups) => {
+            p.state.borrow_mut().backups = backups;
+            fill_courses(p);
+            refill(p);
+        }
         Reply::Status(text, fraction) => {
             p.status.set_text(&text);
             p.progress.set_visible(true);
@@ -807,11 +836,12 @@ fn handle(p: &Page, reply: Reply) {
 }
 
 fn start_scan(p: &Page) {
-    let folders = p.shared.settings().footage_folders.clone();
+    let folders = scan_folders(&p.shared);
     if p.state.borrow().busy {
         return;
     }
     p.state.borrow_mut().scanned = folders.clone();
+    p.state.borrow_mut().journal_seen = journal_changed();
     if folders.is_empty() {
         // Nothing to scan: forget clips from folders that were removed.
         let _ = Library::open_default().and_then(|l| l.retain(&HashSet::new()));
@@ -881,7 +911,7 @@ fn confirm_proxies(p: &Page) {
 
 fn refresh_controls(p: &Page) {
     let s = p.state.borrow();
-    let no_folders = p.shared.settings().footage_folders.is_empty();
+    let no_folders = s.scanned.is_empty();
     p.banner.set_visible(no_folders || s.runs_error.is_some());
     p.banner_text.set_text(if no_folders {
         "Add the folders your footage is in. Ghost Run lists every clip in them and keeps the list up to date."
@@ -934,7 +964,7 @@ fn refill(p: &Page) {
         .clips
         .iter()
         .filter(|c| !s.only_missing || !matches!(c.proxy, ProxyState::Ready(_)))
-        .filter(|c| shown_in(&s.view, s.runs.get(&run_key(&c.path))))
+        .filter(|c| shown_in(&s.view, s.runs.get(&run_key(&c.path)), safe(&s, &c.path)))
         .map(|c| glib::BoxedAnyObject::new(c.clone()))
         .collect();
     drop(s);
@@ -951,6 +981,7 @@ const COLUMNS: &[(&str, i32, usize)] = &[
     ("Recorded", 175, 1),
     ("Length", 70, 2),
     ("Proxy", 90, 4),
+    ("NAS", 110, 8),
     ("Video", 190, 3),
     ("Folder", 200, 7),
 ];
@@ -976,7 +1007,7 @@ fn table(p: &Page) -> gtk::ColumnView {
         let page = p.clone();
         factory.connect_setup(move |_, item| {
             let li = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let text = label("", if index == 4 { "status" } else { "" });
+            let text = label("", if matches!(index, 4 | 8) { "status" } else { "" });
             // Names and folders can be shortened; the rest is short and must show whole.
             if matches!(index, 0 | 5 | 7) {
                 text.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
@@ -1017,6 +1048,12 @@ fn table(p: &Page) -> gtk::ColumnView {
             let clip = object.borrow::<Clip>();
             let s = page.state.borrow();
             let (text, tip) = cell(&s, &clip, index);
+            let backup_class = match s.backups.get(&clip.path) {
+                Some(Backup::OnNas { .. } | Backup::IsOriginal { .. }) => Some("success"),
+                Some(Backup::LocalOnly) => Some("warning"),
+                Some(Backup::Missing { .. }) => Some("error"),
+                None => None,
+            };
             let ticked = s.selected.contains(&clip.path);
             // Let go first: ticking the box below runs its handler, which changes the state.
             drop(s);
@@ -1037,6 +1074,14 @@ fn table(p: &Page) -> gtk::ColumnView {
             };
             label.set_text(&text);
             label.set_tooltip_text(tip.as_deref());
+            if index == 8 {
+                for class in ["success", "warning", "error"] {
+                    label.remove_css_class(class);
+                }
+                if let Some(class) = backup_class {
+                    label.add_css_class(class);
+                }
+            }
             if index == 4 {
                 for class in ["success", "warning", "error"] {
                     label.remove_css_class(class);
@@ -1150,6 +1195,7 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
             Some(r) => (lap_text(r), None),
             None => (String::new(), None),
         },
+        8 => backup_text(s.backups.get(&clip.path)),
         _ => {
             let folder = clip.path.parent().unwrap_or(Path::new(""));
             (
@@ -1240,10 +1286,12 @@ fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
 }
 
 /// Whether a clip with this run (or none) shows in `view`.
-fn shown_in(view: &View, run: Option<&RunInfo>) -> bool {
+/// `safe`: its original is verified on the NAS.
+fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool) -> bool {
     match view {
         View::All => true,
         View::Untimed => run.is_none(),
+        View::NotOnNas => !safe,
         View::Course(id) => run.is_some_and(|r| &r.course_id == id),
     }
 }
@@ -1298,7 +1346,7 @@ fn fill_courses(p: &Page) {
     let count = |view: &View| {
         s.clips
             .iter()
-            .filter(|c| shown_in(view, s.runs.get(&run_key(&c.path))))
+            .filter(|c| shown_in(view, s.runs.get(&run_key(&c.path)), safe(&s, &c.path)))
             .count()
     };
     let mut rows: Vec<(String, String, usize)> = vec![
@@ -1307,6 +1355,11 @@ fn fill_courses(p: &Page) {
             "untimed".into(),
             "Not timed yet".into(),
             count(&View::Untimed),
+        ),
+        (
+            "nas".into(),
+            "Not on the NAS".into(),
+            count(&View::NotOnNas),
         ),
     ];
     for (id, name) in &s.courses {
@@ -1319,6 +1372,7 @@ fn fill_courses(p: &Page) {
     let selected = match &s.view {
         View::All => "all".to_owned(),
         View::Untimed => "untimed".to_owned(),
+        View::NotOnNas => "nas".to_owned(),
         View::Course(id) => format!("course:{id}"),
     };
     drop(s);
@@ -1414,6 +1468,96 @@ fn button(title: &str) -> gtk::Button {
     b
 }
 
+fn safe(s: &State, clip: &Path) -> bool {
+    s.backups.get(clip).is_some_and(Backup::is_safe)
+}
+
+/// The NAS column: whether the clip's original is verified there.
+fn backup_text(backup: Option<&Backup>) -> (String, Option<String>) {
+    match backup {
+        None => (String::new(), None),
+        Some(Backup::LocalOnly) => (
+            "Local only".into(),
+            Some("Not imported through Ghost Run: no verified copy on the NAS".into()),
+        ),
+        Some(Backup::OnNas {
+            original,
+            verified_at,
+        }) => (
+            "Backed up".into(),
+            Some(format!(
+                "Original verified on the NAS {}: {}",
+                short_time(verified_at),
+                original.display()
+            )),
+        ),
+        Some(Backup::IsOriginal { verified_at }) => (
+            "Original".into(),
+            Some(format!(
+                "This is the original, verified on the NAS {}",
+                short_time(verified_at)
+            )),
+        ),
+        Some(Backup::Missing { original }) => (
+            "Missing".into(),
+            Some(format!(
+                "Verified once, but not there now (moved, deleted, or the share isn't mounted): {}",
+                original.display()
+            )),
+        ),
+    }
+}
+
+/// `2026-08-26T20:00:00.123Z` → `2026-08-26 20:00`.
+fn short_time(stamp: &str) -> String {
+    let t = stamp.replace('T', " ");
+    t.get(..16).unwrap_or(&t).to_owned()
+}
+
+/// The folders a scan covers: the footage folders, plus Import's editing
+/// destination, so imported clips show up without adding it by hand.
+fn scan_folders(shared: &Shared) -> Vec<PathBuf> {
+    let mut folders = shared.settings().footage_folders.clone();
+    if let Ok(import) = ingest::settings::Settings::load()
+        && let Some(editing) = import.editing
+        && !folders.iter().any(|f| editing.path.starts_with(f))
+    {
+        folders.push(editing.path);
+    }
+    folders
+}
+
+/// When the import journal last changed (its database or write-ahead log).
+fn journal_changed() -> Option<std::time::SystemTime> {
+    let dir = ingest::settings::data_dir();
+    ["jobs.sqlite3", "jobs.sqlite3-wal"]
+        .iter()
+        .filter_map(|name| {
+            std::fs::metadata(dir.join(name))
+                .and_then(|m| m.modified())
+                .ok()
+        })
+        .max()
+}
+
+/// Each clip's backup state, from the import journal (read-only) and a stat
+/// of each archived original.
+fn backups(clips: &[Clip]) -> HashMap<PathBuf, Backup> {
+    let archived: Vec<library::backup::Archived> =
+        ingest::jobs::archived(&ingest::settings::data_dir())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| library::backup::Archived {
+                original: a.original,
+                editing: a.editing,
+                verified_at: a.verified_at,
+            })
+            .collect();
+    library::backup::states(clips.iter().map(|c| c.path.as_path()), &archived, |p| {
+        p.exists()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1455,12 +1599,14 @@ mod tests {
         // Ignored: its lap, no place.
         assert_eq!(lap_text(&runs["c.mp4"]), "0:08.000");
 
-        assert!(shown_in(&View::All, None));
-        assert!(shown_in(&View::Untimed, None));
-        assert!(!shown_in(&View::Untimed, Some(a)));
-        assert!(shown_in(&View::Course("lw".into()), Some(a)));
-        assert!(!shown_in(&View::Course("other".into()), Some(a)));
-        assert!(!shown_in(&View::Course("lw".into()), None));
+        assert!(shown_in(&View::All, None, false));
+        assert!(shown_in(&View::Untimed, None, false));
+        assert!(!shown_in(&View::Untimed, Some(a), false));
+        assert!(shown_in(&View::Course("lw".into()), Some(a), false));
+        assert!(!shown_in(&View::Course("other".into()), Some(a), false));
+        assert!(!shown_in(&View::Course("lw".into()), None, false));
+        assert!(shown_in(&View::NotOnNas, Some(a), false));
+        assert!(!shown_in(&View::NotOnNas, None, true));
     }
 
     #[test]

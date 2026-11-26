@@ -9,10 +9,12 @@
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
 //! - [`overlays`]: where rendered overlays go.
+//! - [`backup`]: whether each clip's original is verified on the NAS.
 //! - [`auto`]: placing a clip's markers from the course's reference run, and
 //!   telling which course a clip is.
 
 pub mod auto;
+pub mod backup;
 pub mod frames;
 pub mod overlays;
 pub mod probe;
