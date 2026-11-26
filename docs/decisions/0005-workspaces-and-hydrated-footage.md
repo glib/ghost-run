@@ -107,11 +107,13 @@ Three tiers:
 - Rides are named in the catalog, not in folder names, so naming or regrouping
   a ride never moves files on the NAS.
 - Earlier imports stay where they are and are read as before.
-- Beside the footage root, in the same share: `Exports/` (finished videos,
-  `YYYY-MM-DD Title.ext`), `Brand/` (logos, intro animations, music, fonts,
-  title templates), `Projects/` (Resolve project exports), `Other/`, and
+- Beside the footage root, in the same share: `exports/` (finished videos,
+  `YYYY-MM-DD Title.ext`), `brand/` (logos, intro animations, music, fonts,
+  title templates), `projects/` (Resolve project exports), `other/`, and
   `_review/` for whatever the tidy couldn't place. Ghost Run reads only the
-  footage root.
+  footage root, which is `footage/` in the share.
+- Folder names on the share are lowercase (`footage/`, `exports/` …): Liam's
+  choice when the tidy ran (2026-11-26).
 
 ### Catalog
 
