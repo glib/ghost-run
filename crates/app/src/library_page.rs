@@ -91,6 +91,8 @@ enum View {
     NotOnNas,
     /// NAS clips with a local copy.
     Local,
+    /// Clips with markers placed but not committed.
+    Drafts,
     Course(String),
 }
 
@@ -120,6 +122,12 @@ struct State {
     roots: Roots,
     /// What the local copies of NAS clips take, in bytes.
     local_bytes: u64,
+    /// Just imported: to auto-place once the next scan has found them.
+    pending_auto: Vec<PathBuf>,
+    /// A scan is wanted as soon as the worker is free.
+    rescan_wanted: bool,
+    /// The worker's current job is a scan.
+    scanning: bool,
 }
 
 #[derive(Clone)]
@@ -335,6 +343,9 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             journal_seen: None,
             roots: Roots::default(),
             local_bytes: 0,
+            pending_auto: Vec::new(),
+            rescan_wanted: false,
+            scanning: false,
         })),
         store: store.clone(),
         tx,
@@ -434,6 +445,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             "untimed" => View::Untimed,
             "nas" => View::NotOnNas,
             "local" => View::Local,
+            "drafts" => View::Drafts,
             n => match n.strip_prefix("course:") {
                 Some(id) => View::Course(id.to_owned()),
                 None => View::All,
@@ -489,11 +501,30 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
     shared.subscribe(move |change| {
-        if matches!(
-            change,
-            Change::TimeClip | Change::Render | Change::Resolve | Change::ShowLibrary
-        ) {
-            return;
+        match change {
+            Change::TimeClip | Change::Render | Change::Resolve => return,
+            // After an import, show what needs checking.
+            Change::ShowLibrary => {
+                if !p.state.borrow().drafted.is_empty() {
+                    p.state.borrow_mut().view = View::Drafts;
+                    fill_courses(&p);
+                    refill(&p);
+                }
+                return;
+            }
+            Change::Imported => {
+                let new = p.shared.take_imported();
+                let mut s = p.state.borrow_mut();
+                s.pending_auto.extend(new);
+                s.rescan_wanted = true;
+                let busy = s.busy;
+                drop(s);
+                if !busy {
+                    start_scan(&p);
+                }
+                return;
+            }
+            _ => {}
         }
         load_runs(&p);
         fill_courses(&p);
@@ -914,16 +945,27 @@ fn auto_place(
 
 /// Auto-places the ticked clips that have neither a run nor a draft yet.
 fn start_auto(p: &Page) {
+    let ticked: Vec<PathBuf> = p.state.borrow().selected.iter().cloned().collect();
+    start_auto_for(p, &ticked, false);
+}
+
+/// Auto-places `paths` (clips without a run or draft). `quiet`: just after an
+/// import, so the status line only speaks if there's something to place.
+fn start_auto_for(p: &Page, paths: &[PathBuf], quiet: bool) {
+    // After an import, a missing database or reference just means no drafts.
+    let say = |text: &str| {
+        if !quiet {
+            p.status.set_text(text);
+        }
+    };
     let Some(db_path) = p.shared.settings().run_database.clone() else {
-        p.status
-            .set_text("Choose your run database first (the gear in the sidebar).");
+        say("Choose your run database first (the gear in the sidebar).");
         return;
     };
     let db = match timer_core::TimerDatabase::load(&db_path) {
         Ok(db) => db,
         Err(e) => {
-            p.status
-                .set_text(&format!("The run database couldn't be read: {e}"));
+            say(&format!("The run database couldn't be read: {e}"));
             return;
         }
     };
@@ -931,14 +973,14 @@ fn start_auto(p: &Page) {
     let references = match Library::open_default().and_then(|l| auto::references(&db, &l, &s.clips))
     {
         Ok(r) if r.is_empty() => {
-            p.status.set_text(
+            say(
                 "No course has a run with footage to match against yet: time one run on each course by hand first.",
             );
             return;
         }
         Ok(r) => r,
         Err(e) => {
-            p.status.set_text(&format!("{e:#}"));
+            say(&format!("{e:#}"));
             return;
         }
     };
@@ -946,7 +988,7 @@ fn start_auto(p: &Page) {
     let jobs: Vec<(PathBuf, PathBuf)> = s
         .clips
         .iter()
-        .filter(|c| s.selected.contains(&c.path) && c.info.is_some())
+        .filter(|c| paths.contains(&c.path) && c.info.is_some())
         .filter(|c| {
             let done = s.runs.contains_key(&run_key(&c.path)) || s.drafted.contains(&c.path);
             skipped += usize::from(done);
@@ -956,7 +998,7 @@ fn start_auto(p: &Page) {
         .collect();
     drop(s);
     if jobs.is_empty() {
-        p.status.set_text(
+        say(
             "The ticked clips already have runs or drafts: double-click one to place its markers again.",
         );
         return;
@@ -965,7 +1007,8 @@ fn start_auto(p: &Page) {
     s.busy = true;
     drop(s);
     p.status.set_text(&format!(
-        "Auto-placing {} {}{}…",
+        "{}Auto-placing {} {}{}…",
+        if quiet { "Imported clips: " } else { "" },
         jobs.len(),
         plural(jobs.len(), "clip", "clips"),
         if skipped > 0 {
@@ -1038,6 +1081,13 @@ fn handle(p: &Page, reply: Reply) {
             s.busy = false;
             s.making.clear();
             s.queued.clear();
+            let was_scan = std::mem::take(&mut s.scanning);
+            let rescan = s.rescan_wanted;
+            let imported = if was_scan && !rescan {
+                std::mem::take(&mut s.pending_auto)
+            } else {
+                Vec::new()
+            };
             drop(s);
             p.status.set_text(&text);
             p.progress.set_visible(false);
@@ -1045,6 +1095,11 @@ fn handle(p: &Page, reply: Reply) {
             load_runs(p);
             fill_courses(p);
             refill(p);
+            if rescan {
+                start_scan(p);
+            } else if !imported.is_empty() {
+                start_auto_for(p, &imported, true);
+            }
         }
     }
 }
@@ -1057,6 +1112,7 @@ fn start_scan(p: &Page) {
     }
     p.state.borrow_mut().roots = roots.clone();
     p.state.borrow_mut().scanned = folders.clone();
+    p.state.borrow_mut().rescan_wanted = false;
     p.state.borrow_mut().journal_seen = journal_changed();
     if folders.is_empty() && (roots.nas.is_none() || roots.nas_online) {
         // Nothing to scan: forget clips from folders that were removed.
@@ -1066,6 +1122,7 @@ fn start_scan(p: &Page) {
         return;
     }
     p.state.borrow_mut().busy = true;
+    p.state.borrow_mut().scanning = true;
     refresh_controls(p);
     let backup_to = ingest::settings::Settings::load()
         .ok()
@@ -1546,6 +1603,9 @@ fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
 
 /// Whether `clip` shows in `view`.
 fn shows(s: &State, view: &View, clip: &Clip) -> bool {
+    if *view == View::Drafts {
+        return s.drafted.contains(&clip.path);
+    }
     let local = s.roots.on_nas(&clip.path) && clip.local.is_some();
     shown_in(
         view,
@@ -1564,6 +1624,7 @@ fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool, local: bool) -> bool
         View::Untimed => run.is_none(),
         View::NotOnNas => !safe,
         View::Local => local,
+        View::Drafts => false,
         View::Course(id) => run.is_some_and(|r| &r.course_id == id),
     }
 }
@@ -1746,6 +1807,11 @@ fn fill_courses(p: &Page) {
             count(&View::NotOnNas),
         ),
         ("local".into(), "Local copies".into(), count(&View::Local)),
+        (
+            "drafts".into(),
+            "Drafts to check".into(),
+            count(&View::Drafts),
+        ),
     ];
     for (id, name) in &s.courses {
         rows.push((
@@ -1759,6 +1825,7 @@ fn fill_courses(p: &Page) {
         View::Untimed => "untimed".to_owned(),
         View::NotOnNas => "nas".to_owned(),
         View::Local => "local".to_owned(),
+        View::Drafts => "drafts".to_owned(),
         View::Course(id) => format!("course:{id}"),
     };
     drop(s);
@@ -1921,16 +1988,7 @@ fn short_time(stamp: &str) -> String {
 /// The NAS footage root and the local root, from Import's settings; the NAS
 /// counts as online only while it's mounted as it was set up.
 pub fn roots() -> Roots {
-    let import = ingest::settings::Settings::load().unwrap_or_default();
-    Roots {
-        nas_online: import
-            .archive
-            .as_ref()
-            .is_some_and(|a| ingest::storage::Root::destination(a).is_ok()),
-        nas: import.archive.map(|a| a.path),
-        local: import.editing.map(|e| e.path),
-        catalog: library::preview::dir(),
-    }
+    Roots::from_import(&ingest::settings::Settings::load().unwrap_or_default())
 }
 
 /// The folders a scan covers: the footage folders, plus Import's editing

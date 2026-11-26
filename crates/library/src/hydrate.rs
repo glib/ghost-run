@@ -108,6 +108,46 @@ pub fn dehydrate(clip: &Clip, roots: &Roots) -> Result<u64> {
     Ok(freed)
 }
 
+/// What [`settle`] did with a newly imported clip's local copy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Settled {
+    /// Kept, with its proxy made, to edit now.
+    Kept,
+    /// Removed, freeing these bytes.
+    Removed(u64),
+}
+
+/// After an import (decision 0005): makes the catalog's preview of a clip
+/// just verified on the NAS from its local copy, while that's still here,
+/// then either keeps the copy (making its proxy) or removes it.
+/// `progress` gets the step ("preview", "proxy") and 0.0–1.0.
+pub fn settle(
+    clip: &Clip,
+    roots: &Roots,
+    keep: bool,
+    cancel: &Cancel,
+    mut progress: impl FnMut(&str, f64),
+) -> Result<Settled> {
+    let info = clip.info.as_ref().context("the clip couldn't be read")?;
+    let local = clip
+        .local
+        .as_deref()
+        .context("the clip has no local copy")?;
+    let preview = crate::preview::preview_path(&roots.catalog, &clip.path, clip.size);
+    if !preview.is_file() {
+        crate::preview::make(&roots.catalog, clip, 0, cancel, |f| progress("preview", f))
+            .context("making its preview")?;
+    }
+    if keep {
+        if !proxy::proxy_path(local).is_file() {
+            proxy::make(local, info, cancel, |f| progress("proxy", f))
+                .context("making its proxy")?;
+        }
+        return Ok(Settled::Kept);
+    }
+    Ok(Settled::Removed(dehydrate(clip, roots)?))
+}
+
 /// The bytes the local copies of NAS clips take, proxies included.
 pub fn local_bytes<'a>(clips: impl IntoIterator<Item = &'a Clip>, roots: &Roots) -> u64 {
     clips
@@ -180,5 +220,18 @@ mod tests {
         assert!(freed > 0);
         assert!(!local.exists());
         assert!(original.exists());
+
+        // After an import: the preview is made from the copy, then the copy
+        // is kept with its proxy, or removed.
+        let local = hydrate(&clip, &roots, &Cancel::default(), |_| {}).unwrap();
+        let kept = settle(&clip, &roots, true, &Cancel::default(), |_, _| {}).unwrap();
+        assert_eq!(kept, Settled::Kept);
+        assert!(proxy::proxy_path(&local).is_file());
+        let preview = crate::preview::preview_path(&roots.catalog, &clip.path, clip.size);
+        assert!(preview.is_file());
+        let removed = settle(&clip, &roots, false, &Cancel::default(), |_, _| {}).unwrap();
+        assert!(matches!(removed, Settled::Removed(n) if n > 0));
+        assert!(!local.exists() && !proxy::proxy_path(&local).exists());
+        assert!(preview.is_file() && original.exists());
     }
 }

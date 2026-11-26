@@ -20,6 +20,9 @@ pub enum Change {
     Resolve,
     /// Show the Library page (after an import).
     ShowLibrary,
+    /// An import finished ([`Shared::imported`]): the Library rescans and
+    /// places markers in the new clips.
+    Imported,
 }
 
 /// Where runs sent to Resolve go.
@@ -49,6 +52,8 @@ pub struct Shared {
     to_render: Rc<RefCell<Vec<String>>>,
     /// Runs picked to go into Resolve, for the Output page to take.
     to_resolve: Rc<RefCell<ToResolve>>,
+    /// Originals just imported to the NAS, for the Library to take.
+    imported: Rc<RefCell<Vec<std::path::PathBuf>>>,
 }
 
 impl Shared {
@@ -68,6 +73,7 @@ impl Shared {
             to_time: Rc::default(),
             to_render: Rc::default(),
             to_resolve: Rc::default(),
+            imported: Rc::default(),
         }
     }
 
@@ -128,6 +134,17 @@ impl Shared {
     /// The runs picked to go into Resolve, once.
     pub fn take_runs_for_resolve(&self) -> ToResolve {
         self.to_resolve.borrow_mut().take()
+    }
+
+    /// Tells the Library these originals were just imported to the NAS.
+    pub fn imported(&self, originals: Vec<std::path::PathBuf>) {
+        self.imported.borrow_mut().extend(originals);
+        self.notify(Change::Imported);
+    }
+
+    /// The originals just imported, once.
+    pub fn take_imported(&self) -> Vec<std::path::PathBuf> {
+        std::mem::take(&mut self.imported.borrow_mut())
     }
 
     pub fn notify(&self, change: Change) {
