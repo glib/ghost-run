@@ -869,6 +869,7 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                                 b.run_database.as_deref(),
                                 &b.archive.path,
                                 chrono::Local::now().date_naive(),
+                                &library::settings::data_dir().join("backup-staging"),
                             )
                         })
                     });
@@ -879,6 +880,10 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     };
                     let note = offline.to_owned()
                         + &match backed_up {
+                            Some(Ok(r)) if !r.failed.is_empty() => format!(
+                                " Catalog backup to the NAS failed: {}.",
+                                r.failed.join("; ")
+                            ),
                             Some(Ok(r)) if !r.written.is_empty() => {
                                 " Catalog backed up to the NAS.".to_owned()
                             }
