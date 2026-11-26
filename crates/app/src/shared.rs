@@ -48,9 +48,9 @@ pub struct Shared {
     pub load_error: Option<String>,
     /// The clip picked to be timed, for the Time page to take.
     to_time: Rc<RefCell<Option<std::path::PathBuf>>>,
-    /// Runs picked to render, for the Output page to take.
+    /// Runs picked to render, for the jobs drawer to take.
     to_render: Rc<RefCell<Vec<String>>>,
-    /// Runs picked to go into Resolve, for the Output page to take.
+    /// Runs picked to go into Resolve, for the jobs drawer to take.
     to_resolve: Rc<RefCell<ToResolve>>,
     /// Originals just imported to the NAS, for the Library to take.
     imported: Rc<RefCell<Vec<std::path::PathBuf>>>,
@@ -113,7 +113,7 @@ impl Shared {
         self.to_time.borrow_mut().take()
     }
 
-    /// Queues these runs' overlays on the Output page.
+    /// Queues these runs' overlays in the jobs drawer.
     pub fn render_runs(&self, run_ids: Vec<String>) {
         self.to_render.borrow_mut().extend(run_ids);
         self.notify(Change::Render);
@@ -124,7 +124,7 @@ impl Shared {
         std::mem::take(&mut self.to_render.borrow_mut())
     }
 
-    /// Sends these runs to Resolve (through the Output page, which renders
+    /// Sends these runs to Resolve (through the jobs drawer, which renders
     /// any overlay that's missing or out of date first).
     pub fn send_to_resolve(&self, target: ResolveTarget, run_ids: Vec<String>) {
         *self.to_resolve.borrow_mut() = Some((target, run_ids));

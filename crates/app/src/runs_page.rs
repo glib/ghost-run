@@ -113,7 +113,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     ));
     let include = button("Count again");
     let render = button("Render overlays");
-    render.set_tooltip_text(Some("Render these runs' timer overlays (Output page)"));
+    render.set_tooltip_text(Some("Render these runs' timer overlays (in Jobs)"));
     let to_resolve = crate::resolve_menu::menu();
     let delete = button("Delete…");
     delete.add_css_class("destructive-action");
