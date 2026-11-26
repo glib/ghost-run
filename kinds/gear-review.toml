@@ -1,0 +1,31 @@
+# A video kind (decision 0005); see trail.toml for what can go in one.
+#
+# Kinds made of catalogued clips can use: {name} (the tag, collection, ride
+# or feature), {clips}, {attempts}, {days} (numbers) and {clips_text},
+# {attempts_text}, {days_text} ("3 clips", "1 day"), {date}, {first_date},
+# {latest_date}, {landed}, {result} ("Landed on attempt 4"); and in a clip's
+# caption, {attempt}, {day} (its day's number), {date}, {ride}, {course},
+# {lap}, {outcome}.
+
+id = "gear-review"
+name = "Gear review"
+description = "The clips tagged with a piece of gear, in the order filmed, between a hook card and a verdict card. Put the talking where it belongs and write the cards on the Videos page."
+# The clips with one tag, e.g. "gear: Fox helmet".
+input = "tag"
+title = "{name}: review"
+
+[[section]]
+type = "title"
+text = "{name}"
+subtitle = "Ridden from {first_date} to {latest_date}"
+seconds = 3
+
+[[section]]
+type = "clips"
+timer = "off"
+
+[[section]]
+type = "end"
+text = "The verdict"
+subtitle = "{name}"
+seconds = 4

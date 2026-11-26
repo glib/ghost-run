@@ -22,6 +22,7 @@
 pub mod auto;
 pub mod backup;
 pub mod catalog_backup;
+pub mod features;
 pub mod footage;
 pub mod frames;
 pub mod hydrate;

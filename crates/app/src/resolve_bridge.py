@@ -318,7 +318,8 @@ def new_project(resolve, request):
     V1 (with its audio), the part from `first_frame` for `frames`, and its
     overlay, if it has one, above it on V2 where it falls in that part
     (`overlay_first_frame`/`overlay_frames`; by default the overlay starts
-    with the part and is as long); proxies linked."""
+    with the part and is as long); its `caption`, if it has one, on V3 from
+    the part's start for `caption_frames`; proxies linked."""
     runs = request.get("runs", [])
     if not runs:
         raise BridgeError("bad_request", "no runs to put in the project")
@@ -340,7 +341,8 @@ def new_project(resolve, request):
     if not timeline:
         raise BridgeError("create_failed", "Resolve couldn't create the timeline")
     project.SetCurrentTimeline(timeline)
-    while int(timeline.GetTrackCount("video")) < 2:
+    tracks = 3 if any(run.get("caption") for run in runs) else 2
+    while int(timeline.GetTrackCount("video")) < tracks:
         timeline.AddTrack("video")
 
     notes = []
@@ -384,6 +386,21 @@ def new_project(resolve, request):
                 notes.append("%s: Resolve refused to add its overlay" % clip_name)
         elif overlay:
             notes.append("%s: its overlay file is missing" % clip_name)
+        caption = run.get("caption")
+        if caption and os.path.isfile(caption):
+            length = min(int(run.get("caption_frames", frames)), frames)
+            item = import_overlay(media_pool, overlays_bin, caption)
+            if not media_pool.AppendToTimeline([{
+                "mediaPoolItem": item,
+                "startFrame": 0,
+                "endFrame": length - 1,
+                "recordFrame": record,
+                "trackIndex": 3,
+                "mediaType": 1,
+            }]):
+                notes.append("%s: Resolve refused to add its caption" % clip_name)
+        elif caption:
+            notes.append("%s: its caption file is missing" % clip_name)
         placed += 1
         record += frames
     pm.SaveProject()

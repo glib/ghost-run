@@ -736,6 +736,18 @@ fn create_video(
             run["overlay_first_frame"] = serde_json::json!(r.first_frame);
             run["overlay_frames"] = serde_json::json!(frames);
         }
+        if let Some(text) = item.caption.as_deref().filter(|t| !t.trim().is_empty()) {
+            let file = cards_dir.join(format!("{index:02}-caption.mov"));
+            let frames = crate::cards::make_caption(
+                text,
+                (width as i32, height as i32),
+                &format!("{}/{}", info.fps_num, info.fps_den),
+                item.frames.max(1),
+                &file,
+            )?;
+            run["caption"] = serde_json::json!(file);
+            run["caption_frames"] = serde_json::json!(frames);
+        }
         runs.push(run);
         uses.push(Use {
             video: id,

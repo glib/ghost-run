@@ -1,0 +1,26 @@
+# A video kind (decision 0005); see trail.toml and gear-review.toml for what
+# can go in one.
+
+id = "feature-progression"
+name = "Feature progression"
+description = "Every attempt at a feature in order, each with its attempt number, day and how it went."
+# A feature's attempts (Library → Organise → Feature attempt…).
+input = "feature"
+title = "{name}: {attempts_text}"
+
+[[section]]
+type = "title"
+text = "{name}"
+subtitle = "{attempts_text} over {days_text}"
+seconds = 3
+
+[[section]]
+type = "clips"
+timer = "off"
+caption = "Attempt {attempt} · Day {day} · {outcome}"
+
+[[section]]
+type = "end"
+text = "{result}"
+subtitle = "{name}"
+seconds = 3

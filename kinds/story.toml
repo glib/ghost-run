@@ -1,0 +1,27 @@
+# A video kind (decision 0005); see trail.toml and gear-review.toml for what
+# can go in one.
+
+id = "story"
+name = "Story"
+description = "A collection, ride by ride in the order filmed: a card for each ride, timed runs with their timer."
+input = "collection"
+title = "{name}"
+
+[[section]]
+type = "title"
+text = "{name}"
+subtitle = "{first_date} to {latest_date}"
+seconds = 3
+
+[[section]]
+type = "clips"
+timer = "on"
+# A card before each ride's clips.
+ride_title = "{ride}"
+ride_subtitle = "{date}"
+ride_seconds = 2.5
+
+[[section]]
+type = "end"
+text = "{name}"
+seconds = 3
