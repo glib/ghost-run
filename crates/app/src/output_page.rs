@@ -506,6 +506,7 @@ fn add_overlays(
             .ok_or_else(|| anyhow::anyhow!("{} can't be read", overlay.display()))?;
         // Sent in case the clip isn't on the timeline yet and the bridge adds it.
         let proxy = ready_proxy(&clips, clip);
+        let clip = editable(&clips, clip);
         requests.push(serde_json::json!({
             "clip": clip, "proxy": proxy, "overlay": overlay,
             "first_frame": first_frame, "frames": frames,
@@ -727,6 +728,7 @@ fn create_project(
             };
             format = Some(info);
         }
+        let clip = editable(&clips, clip);
         runs.push(serde_json::json!({
             "clip": clip, "proxy": proxy, "overlay": overlay,
             "first_frame": first_frame, "frames": frames,
@@ -748,6 +750,15 @@ fn create_project(
         "runs": runs,
     }))?;
     Ok(describe_project(&reply))
+}
+
+/// The file Resolve should use for a clip: for an original on the NAS, its
+/// local copy while there is one.
+fn editable(clips: &[library::Clip], clip: &std::path::Path) -> PathBuf {
+    clips
+        .iter()
+        .find(|c| c.path == clip)
+        .map_or_else(|| clip.to_owned(), |c| c.editable().to_owned())
 }
 
 /// The clip's proxy, if the library has one ready.
@@ -912,7 +923,13 @@ fn prepare(p: &Page, run_id: &str) -> Result<Job, String> {
     let clip = auto::run_clip(run, &clips)
         .ok_or("its clip wasn't found: add its folder in Settings, or check it's still there")?
         .path;
-    let out = overlays::overlay_path(&clip, settings.overlay_folder.as_deref());
+    // Overlays stay on this machine: for an original on the NAS, beside where
+    // its local copy goes.
+    let local = crate::library_page::roots().local_copy(&clip);
+    let out = overlays::overlay_path(
+        local.as_deref().unwrap_or(&clip),
+        settings.overlay_folder.as_deref(),
+    );
     Ok(Job {
         run_id: run_id.to_owned(),
         payload,

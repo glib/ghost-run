@@ -1,5 +1,10 @@
 //! Finding clips: walk the footage folders, probe what's new or changed, note
 //! proxies that already exist, and forget clips that are gone.
+//!
+//! An original on the NAS ([`Roots`]) is listed once: its local editing copy,
+//! if there is one, is noted on it rather than listed beside it, along with
+//! the catalog's preview. While the NAS isn't mounted, its clips stay as last
+//! catalogued.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -8,10 +13,11 @@ use std::time::UNIX_EPOCH;
 use anyhow::Result;
 use walkdir::WalkDir;
 
+use crate::footage::Roots;
 use crate::probe::{self, MediaInfo};
-use crate::proxy;
 use crate::store::{Clip, Library, ProxyState};
 use crate::{Cancel, cancelled};
+use crate::{preview, proxy};
 
 /// Video files by extension (any case).
 const VIDEO: &[&str] = &["mp4", "mov", "m4v", "mxf", "mkv", "avi", "mts", "m2ts"];
@@ -93,14 +99,39 @@ pub fn find(folders: &[PathBuf], cancel: &Cancel) -> Vec<PathBuf> {
     found
 }
 
+/// Scans `folders` (which should include the NAS footage root while it's
+/// mounted, and the local root).
 pub fn scan(
     folders: &[PathBuf],
+    roots: &Roots,
     library: &Library,
     cancel: &Cancel,
     mut progress: impl FnMut(Progress),
 ) -> Result<ScanReport> {
     progress(Progress::Looking(0));
-    let paths = find(folders, cancel);
+    let mut paths = find(folders, cancel);
+    // While the NAS is offline, its clips stay as last catalogued.
+    let offline: Vec<Clip> = if roots.nas_online {
+        Vec::new()
+    } else {
+        library
+            .clips()?
+            .into_iter()
+            .filter(|c| roots.on_nas(&c.path))
+            .collect()
+    };
+    // A local copy is listed as its original, when that's in the Library.
+    let originals: HashSet<PathBuf> = paths
+        .iter()
+        .chain(offline.iter().map(|c| &c.path))
+        .filter(|p| roots.on_nas(p))
+        .cloned()
+        .collect();
+    paths.retain(|p| roots.original_of(p).is_none_or(|o| !originals.contains(&o)));
+    for mut clip in offline.iter().cloned() {
+        place(&mut clip, roots);
+        library.upsert(&clip)?;
+    }
     let mut report = ScanReport {
         found: paths.len(),
         ..Default::default()
@@ -137,31 +168,53 @@ pub fn scan(
                     recorded_source: source.into(),
                     probe_error: probed.as_ref().err().map(|e| format!("{e:#}")),
                     info: probed.ok(),
-                    proxy: ProxyState::Missing,
+                    ..Clip::default()
                 }
             }
         };
         if clip.info.is_none() {
             report.unreadable += 1;
         }
-        clip.proxy = proxy_state(&clip);
+        place(&mut clip, roots);
         library.upsert(&clip)?;
     }
     if !cancelled(cancel) {
-        let keep: HashSet<PathBuf> = paths.into_iter().collect();
+        let keep: HashSet<PathBuf> = paths
+            .into_iter()
+            .chain(offline.into_iter().map(|c| c.path))
+            .collect();
         report.removed = library.retain(&keep)?;
     }
     Ok(report)
 }
 
+/// Notes a clip's local copy, preview and proxy as they are on disk now.
+pub fn place(clip: &mut Clip, roots: &Roots) {
+    if roots.on_nas(&clip.path) {
+        clip.local = roots.local_copy(&clip.path).filter(|p| p.is_file());
+        clip.preview = Some(preview::preview_path(&roots.catalog, &clip.path, clip.size))
+            .filter(|p| p.is_file());
+    } else {
+        clip.local = None;
+        clip.preview = None;
+    }
+    clip.proxy = proxy_state(clip, roots);
+}
+
 /// The proxy's state after a scan: a recorded proxy that has gone missing is
 /// missing; one that has appeared (made by Resolve, or before the library
-/// existed) is checked before it counts.
-fn proxy_state(clip: &Clip) -> ProxyState {
-    let path = proxy::proxy_path(&clip.path);
+/// existed) is checked before it counts. An original on the NAS has a proxy
+/// only through its local copy.
+fn proxy_state(clip: &Clip, roots: &Roots) -> ProxyState {
+    let source = match (&clip.local, roots.on_nas(&clip.path)) {
+        (Some(local), _) => local.clone(),
+        (None, true) => return ProxyState::Missing,
+        (None, false) => clip.path.clone(),
+    };
+    let path = proxy::proxy_path(&source);
     match (&clip.proxy, &clip.info) {
-        (ProxyState::Ready(p), _) if p.exists() => clip.proxy.clone(),
-        (_, Some(info)) if path.exists() => match proxy::verify(&clip.path, info, &path) {
+        (ProxyState::Ready(p), _) if p.exists() && *p == path => clip.proxy.clone(),
+        (_, Some(info)) if path.exists() => match proxy::verify(&source, info, &path) {
             Ok(()) => ProxyState::Ready(path),
             Err(e) => ProxyState::Failed(format!("existing proxy doesn't match: {e:#}")),
         },
@@ -237,6 +290,82 @@ mod tests {
             .map(|p| p.strip_prefix(root).unwrap().display().to_string())
             .collect();
         assert_eq!(names, ["a/DJI_1.MP4", "a/DJI_2.MP4.mov", "b/GX010150.mp4"]);
+    }
+
+    #[test]
+    fn nas_originals_are_listed_once_with_their_local_copy_and_kept_while_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let roots = Roots {
+            nas: Some(root.join("nas")),
+            nas_online: true,
+            local: Some(root.join("edit")),
+            catalog: root.join("catalog"),
+        };
+        for f in [
+            "nas/2026/2026-11-24/DJI_1.MP4",
+            "nas/2026/2026-11-24/DJI_2.MP4",
+            "edit/2026/2026-11-24/DJI_1.MP4.mov",
+            "edit/other/GX0101.MP4",
+            "catalog/DJI_2.MP4.1.preview.mov",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        let library = Library::open(&root.join("library.sqlite3")).unwrap();
+        let all = [root.join("nas"), root.join("edit")];
+        scan(&all, &roots, &library, &Cancel::default(), |_| {}).unwrap();
+        let clips = library.clips().unwrap();
+        let mut listed: Vec<(String, bool, bool)> = clips
+            .iter()
+            .map(|c| {
+                (
+                    c.path.strip_prefix(root).unwrap().display().to_string(),
+                    c.local.is_some(),
+                    c.preview.is_some(),
+                )
+            })
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [
+                ("edit/other/GX0101.MP4".into(), false, false),
+                ("nas/2026/2026-11-24/DJI_1.MP4".into(), true, false),
+                ("nas/2026/2026-11-24/DJI_2.MP4".into(), false, true),
+            ]
+        );
+        let one = clips.iter().find(|c| c.name() == "DJI_1.MP4").unwrap();
+        assert_eq!(
+            one.editable(),
+            root.join("edit/2026/2026-11-24/DJI_1.MP4.mov")
+        );
+
+        // The share goes offline (scanned as an empty folder, or not at all):
+        // its clips stay, and the local copy is still folded into its original.
+        let offline = Roots {
+            nas_online: false,
+            ..roots.clone()
+        };
+        scan(
+            &[root.join("edit")],
+            &offline,
+            &library,
+            &Cancel::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(library.clips().unwrap().len(), 3);
+
+        // The local copy is removed: the original stays, without one.
+        std::fs::remove_file(root.join("edit/2026/2026-11-24/DJI_1.MP4.mov")).unwrap();
+        scan(&all, &roots, &library, &Cancel::default(), |_| {}).unwrap();
+        let one = library
+            .get(&root.join("nas/2026/2026-11-24/DJI_1.MP4"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(one.local, None);
     }
 
     #[test]

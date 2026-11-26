@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::probe::MediaInfo;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Clip {
     pub path: PathBuf,
     pub size: u64,
@@ -23,7 +23,14 @@ pub struct Clip {
     /// `None` when ffprobe couldn't read it (`probe_error` says why).
     pub info: Option<MediaInfo>,
     pub probe_error: Option<String>,
+    /// The proxy: for an original on the NAS, its local copy's proxy.
     pub proxy: ProxyState,
+    /// For an original on the NAS: its local editing copy, while there is one
+    /// ([`crate::footage`]).
+    pub local: Option<PathBuf>,
+    /// For an original on the NAS: the catalog's preview, once made
+    /// ([`crate::preview`]).
+    pub preview: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -36,6 +43,23 @@ pub enum ProxyState {
 }
 
 impl Clip {
+    /// The file to read frames from: the proxy (every frame a key frame),
+    /// else the catalog's preview, else the local copy, else the clip.
+    pub fn frames_from(&self) -> PathBuf {
+        if let ProxyState::Ready(proxy) = &self.proxy {
+            return proxy.clone();
+        }
+        self.preview
+            .clone()
+            .or_else(|| self.local.clone())
+            .unwrap_or_else(|| self.path.clone())
+    }
+
+    /// The file to edit: the local copy if there is one, else the clip.
+    pub fn editable(&self) -> &Path {
+        self.local.as_deref().unwrap_or(&self.path)
+    }
+
     pub fn name(&self) -> String {
         self.path
             .file_name()
@@ -49,8 +73,8 @@ pub struct Library {
 }
 
 /// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
-/// 5: course target times.
-const VERSION: u32 = 5;
+/// 5: course target times. 6: clips' local copy and preview.
+const VERSION: u32 = 6;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -108,6 +132,15 @@ impl Library {
                rendered_ms INTEGER NOT NULL
              );",
         )?;
+        let has_local: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('clips') WHERE name = 'local'")?
+            .exists([])?;
+        if !has_local {
+            db.execute_batch(
+                "ALTER TABLE clips ADD COLUMN local TEXT;
+                 ALTER TABLE clips ADD COLUMN preview TEXT;",
+            )?;
+        }
         db.pragma_update(None, "user_version", VERSION)?;
         Ok(Self { db })
     }
@@ -116,7 +149,7 @@ impl Library {
     pub fn clips(&self) -> Result<Vec<Clip>> {
         let mut stmt = self.db.prepare(
             "SELECT path, size, modified_ns, recorded, recorded_source, info, probe_error,
-                    proxy_state, proxy_path, proxy_error
+                    proxy_state, proxy_path, proxy_error, local, preview
              FROM clips ORDER BY recorded IS NULL, recorded DESC, path",
         )?;
         let rows = stmt.query_map([], row)?;
@@ -128,7 +161,7 @@ impl Library {
             .db
             .query_row(
                 "SELECT path, size, modified_ns, recorded, recorded_source, info, probe_error,
-                        proxy_state, proxy_path, proxy_error
+                        proxy_state, proxy_path, proxy_error, local, preview
                  FROM clips WHERE path = ?1",
                 [path_text(path)],
                 row,
@@ -143,7 +176,9 @@ impl Library {
             ProxyState::Failed(e) => ("failed", None, Some(e.clone())),
         };
         self.db.execute(
-            "INSERT OR REPLACE INTO clips VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO clips (path, size, modified_ns, recorded, recorded_source,
+               info, probe_error, proxy_state, proxy_path, proxy_error, local, preview)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 path_text(&clip.path),
                 clip.size as i64,
@@ -154,9 +189,19 @@ impl Library {
                 clip.probe_error,
                 state,
                 proxy_path,
-                proxy_error
+                proxy_error,
+                clip.local.as_deref().map(path_text),
+                clip.preview.as_deref().map(path_text)
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn set_preview(&self, path: &Path, preview: Option<PathBuf>) -> Result<()> {
+        if let Some(mut clip) = self.get(path)? {
+            clip.preview = preview;
+            self.upsert(&clip)?;
+        }
         Ok(())
     }
 
@@ -406,6 +451,8 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
             ("failed", _) => ProxyState::Failed(proxy_error.unwrap_or_default()),
             _ => ProxyState::Missing,
         },
+        local: r.get::<_, Option<String>>(10)?.map(PathBuf::from),
+        preview: r.get::<_, Option<String>>(11)?.map(PathBuf::from),
     })
 }
 
@@ -423,6 +470,7 @@ mod tests {
             info: None,
             probe_error: Some("no video stream".into()),
             proxy: ProxyState::Missing,
+            ..Clip::default()
         }
     }
 

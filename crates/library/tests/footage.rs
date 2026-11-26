@@ -77,7 +77,7 @@ fn scans_makes_proxies_and_notices_changes() {
     let folders = vec![footage.clone()];
 
     let mut probing = 0;
-    let report = scan(&folders, &library, &cancel, |p| {
+    let report = scan(&folders, &Default::default(), &library, &cancel, |p| {
         if let Progress::Probing { .. } = p {
             probing += 1
         }
@@ -103,7 +103,7 @@ fn scans_makes_proxies_and_notices_changes() {
     assert!(broken.info.is_none() && broken.probe_error.is_some());
 
     // Unchanged files aren't probed again.
-    let again = scan(&folders, &library, &cancel, |_| {}).unwrap();
+    let again = scan(&folders, &Default::default(), &library, &cancel, |_| {}).unwrap();
     assert_eq!(again.probed, 0);
 
     // A proxy: half size, same frames, rate, timecode and rotation.
@@ -124,7 +124,7 @@ fn scans_makes_proxies_and_notices_changes() {
     );
 
     // A scan finds the proxy, checks it, and doesn't list it as footage.
-    let report = scan(&folders, &library, &cancel, |_| {}).unwrap();
+    let report = scan(&folders, &Default::default(), &library, &cancel, |_| {}).unwrap();
     assert_eq!(report.found, 3);
     assert_eq!(
         library.get(&a).unwrap().unwrap().proxy,
@@ -143,7 +143,7 @@ fn scans_makes_proxies_and_notices_changes() {
         .unwrap()
         .success();
     assert!(ok);
-    scan(&folders, &library, &cancel, |_| {}).unwrap();
+    scan(&folders, &Default::default(), &library, &cancel, |_| {}).unwrap();
     assert!(matches!(
         library.get(&b).unwrap().unwrap().proxy,
         ProxyState::Failed(_)
@@ -163,7 +163,7 @@ fn scans_makes_proxies_and_notices_changes() {
     // Deleted clips leave the library; a changed one is probed again.
     std::fs::remove_file(footage.join("broken.mp4")).unwrap();
     clip(&b);
-    let report = scan(&folders, &library, &cancel, |_| {}).unwrap();
+    let report = scan(&folders, &Default::default(), &library, &cancel, |_| {}).unwrap();
     assert_eq!((report.found, report.removed, report.probed), (2, 1, 1));
 }
 

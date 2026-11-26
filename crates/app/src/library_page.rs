@@ -4,6 +4,13 @@
 //! and adds and renames courses. Timing a clip opens the Time page over the
 //! Library, with a back arrow.
 //!
+//! Clips whose original is on the NAS (Import's archive folder, the footage
+//! root) are listed once, with their local copy if there is one
+//! (`library::footage`), and stay listed while the NAS is offline. After each
+//! scan the catalog's previews are made for NAS clips that have none
+//! (`library::preview`), so timing and auto-place don't need the full-size
+//! files.
+//!
 //! Scans and proxy encodes run on a worker thread (`worker`); the page sends it
 //! [`Command`]s and polls its [`Reply`]s, like the Import page does.
 
@@ -19,6 +26,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 use library::auto::{self, Reference};
 use library::backup::Backup;
+use library::footage::Roots;
 use library::scan::{self, Progress};
 use library::{Cancel, Clip, Draft, Library, MediaInfo, ProxyState, proxy};
 use timer_core::board::course_board;
@@ -29,8 +37,10 @@ use crate::shared::{Change, Shared};
 enum Command {
     /// Scan these folders, then back the catalog up to the NAS archive (with
     /// the run database) if there is one.
-    Scan(Vec<PathBuf>, Option<BackupTo>),
-    Proxies(Vec<(PathBuf, MediaInfo)>),
+    /// Then makes previews for NAS clips without one.
+    Scan(Vec<PathBuf>, Roots, Option<BackupTo>),
+    /// Each clip (its Library path, the file to make the proxy of, its info).
+    Proxies(Vec<(PathBuf, PathBuf, MediaInfo)>),
     /// Place markers in each clip (path, footage to read) from the best-matching course.
     AutoPlace(Vec<(PathBuf, PathBuf)>, Vec<Reference>),
 }
@@ -100,6 +110,8 @@ struct State {
     /// The import journal's last change when the Library last scanned, so
     /// coming back after an import rescans.
     journal_seen: Option<std::time::SystemTime>,
+    /// The NAS footage root and local root as of the last scan.
+    roots: Roots,
 }
 
 #[derive(Clone)]
@@ -297,6 +309,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             only_missing: false,
             backups: HashMap::new(),
             journal_seen: None,
+            roots: Roots::default(),
         })),
         store: store.clone(),
         tx,
@@ -436,13 +449,16 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
     shared.subscribe(move |change| {
-        if matches!(change, Change::TimeClip | Change::Render | Change::Resolve) {
+        if matches!(
+            change,
+            Change::TimeClip | Change::Render | Change::Resolve | Change::ShowLibrary
+        ) {
             return;
         }
         load_runs(&p);
         fill_courses(&p);
         refill(&p);
-        let folders = scan_folders(&p.shared);
+        let folders = scan_folders(&p.shared, &roots());
         if change == Change::Settings && folders != p.state.borrow().scanned {
             start_scan(&p);
         }
@@ -469,7 +485,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             .set_text(&format!("Library could not be opened: {e:#}")),
     }
     refill(&page);
-    if !scan_folders(shared).is_empty() {
+    if !scan_folders(shared, &roots()).is_empty() {
         start_scan(&page);
     }
     // Back on the Library after an import: rescan, so the new clips show.
@@ -487,7 +503,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
 /// each in the library as it finishes. Returns how many were made and failed.
 fn make_proxies(
     library: &Library,
-    queue: Vec<(PathBuf, MediaInfo)>,
+    queue: Vec<(PathBuf, PathBuf, MediaInfo)>,
     cancel: &Cancel,
     replies: &mpsc::Sender<Reply>,
     send_clips: &dyn Fn(&Library),
@@ -496,7 +512,7 @@ fn make_proxies(
     let total = queue.len();
     let (w, h) = queue
         .iter()
-        .map(|(_, i)| (i.width, i.height))
+        .map(|(_, _, i)| (i.width, i.height))
         .max_by_key(|(w, h)| u64::from(*w) * u64::from(*h))
         .unwrap_or((3840, 2160));
     let plan = proxy::plan(w, h, total);
@@ -527,11 +543,11 @@ fn make_proxies(
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
-                    let Some((i, (path, info))) = queue.lock().unwrap().pop_front() else {
+                    let Some((i, (path, source, info))) = queue.lock().unwrap().pop_front() else {
                         break;
                     };
                     let _ = replies.send(Reply::Making(path.clone()));
-                    let result = proxy::make_with(&path, &info, plan.threads, cancel, |f| {
+                    let result = proxy::make_with(&source, &info, plan.threads, cancel, |f| {
                         progress.lock().unwrap()[i] = f;
                         report(*finished.lock().unwrap());
                     });
@@ -565,6 +581,93 @@ fn make_proxies(
     (made, failed)
 }
 
+/// Makes the catalog's preview for each NAS clip that has none, a few at a
+/// time; returns a sentence for the status line (empty if there were none).
+fn make_previews(
+    library: &Library,
+    roots: &Roots,
+    cancel: &Cancel,
+    replies: &mpsc::Sender<Reply>,
+    send_clips: &dyn Fn(&Library),
+) -> String {
+    use std::sync::Mutex;
+    let queue: Vec<Clip> = library
+        .clips()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| roots.on_nas(&c.path) && c.preview.is_none() && c.info.is_some())
+        // Offline, only clips with a local copy can be read.
+        .filter(|c| roots.nas_online || c.local.is_some())
+        .collect();
+    if queue.is_empty() {
+        return String::new();
+    }
+    let total = queue.len();
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+    // Decoding 4K is the slow part; a few at once keeps the cores busy
+    // without the NAS becoming the limit.
+    let jobs = (cores / 8).clamp(1, 4).min(total);
+    let threads = (cores / jobs).max(1);
+    let queue = Mutex::new(queue.into_iter().enumerate().collect::<VecDeque<_>>());
+    let progress = Mutex::new(vec![0.0f64; total]);
+    let finished = Mutex::new(0usize);
+    let (results, done) = mpsc::channel::<(PathBuf, Result<PathBuf, String>)>();
+    let report = |finished: usize| {
+        let fraction = progress.lock().unwrap().iter().sum::<f64>() / total as f64;
+        let _ = replies.send(Reply::Status(
+            format!("Making previews of NAS clips: {finished} of {total} done"),
+            Some(fraction),
+        ));
+    };
+    let catalog = roots.catalog.clone();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs {
+            let results = results.clone();
+            let (queue, progress, finished, report, catalog) =
+                (&queue, &progress, &finished, &report, &catalog);
+            scope.spawn(move || {
+                loop {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some((i, clip)) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let result = library::preview::make(catalog, &clip, threads, cancel, |f| {
+                        progress.lock().unwrap()[i] = f;
+                        report(*finished.lock().unwrap());
+                    });
+                    progress.lock().unwrap()[i] = 1.0;
+                    *finished.lock().unwrap() += 1;
+                    report(*finished.lock().unwrap());
+                    let _ = results.send((clip.path, result.map_err(|e| format!("{e:#}"))));
+                }
+            });
+        }
+        drop(results);
+    });
+    let (mut made, mut failed) = (0usize, Vec::new());
+    for (path, result) in done {
+        match result {
+            Ok(preview) => {
+                made += 1;
+                let _ = library.set_preview(&path, Some(preview));
+            }
+            Err(_) if cancel.load(Ordering::Relaxed) => {}
+            Err(e) => failed.push(format!(
+                "{}: {e}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )),
+        }
+    }
+    send_clips(library);
+    let mut text = format!(" Made {made} {}.", plural(made, "preview", "previews"));
+    if let Some(first) = failed.first() {
+        text.push_str(&format!(" {} failed ({first}).", failed.len()));
+    }
+    text
+}
+
 fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cancel: Cancel) {
     std::thread::spawn(move || {
         let library = match Library::open_default() {
@@ -582,8 +685,8 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
         for command in commands {
             cancel.store(false, Ordering::Relaxed);
             match command {
-                Command::Scan(folders, backup_to) => {
-                    let result = scan::scan(&folders, &library, &cancel, |p| {
+                Command::Scan(folders, roots, backup_to) => {
+                    let result = scan::scan(&folders, &roots, &library, &cancel, |p| {
                         let text = match p {
                             Progress::Looking(_) => "Looking for footage…".to_owned(),
                             Progress::Probing { done, total, path } => format!(
@@ -608,18 +711,32 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                             )
                         })
                     });
-                    let note = match backed_up {
-                        Some(Ok(r)) if !r.written.is_empty() => {
-                            " Catalog backed up to the NAS.".to_owned()
+                    let offline = if roots.nas.is_some() && !roots.nas_online {
+                        " The NAS isn't mounted: its clips are shown as last catalogued."
+                    } else {
+                        ""
+                    };
+                    let note = offline.to_owned()
+                        + &match backed_up {
+                            Some(Ok(r)) if !r.written.is_empty() => {
+                                " Catalog backed up to the NAS.".to_owned()
+                            }
+                            Some(Err(_)) if !offline.is_empty() => String::new(),
+                            Some(Err(e)) => format!(" Catalog backup to the NAS failed: {e:#}."),
+                            _ => String::new(),
+                        };
+                    let previews = match &result {
+                        Ok(_) if !cancel.load(Ordering::Relaxed) => {
+                            make_previews(&library, &roots, &cancel, &replies, &send_clips)
                         }
-                        Some(Err(e)) => format!(" Catalog backup to the NAS failed: {e:#}."),
                         _ => String::new(),
                     };
                     let _ = replies.send(match result {
-                        Ok(r) if cancel.load(Ordering::Relaxed) => {
-                            Reply::Done(format!("Scan stopped after {} clips.{note}", r.probed))
-                        }
-                        Ok(r) => Reply::Done(scan_summary(&r) + &note),
+                        Ok(r) if cancel.load(Ordering::Relaxed) => Reply::Done(format!(
+                            "Stopped after reading {} clips.{note}{previews}",
+                            r.probed
+                        )),
+                        Ok(r) => Reply::Done(scan_summary(&r) + &note + &previews),
                         Err(e) => Reply::Error(format!("Scan failed: {e:#}.{note}")),
                     });
                 }
@@ -862,13 +979,15 @@ fn handle(p: &Page, reply: Reply) {
 }
 
 fn start_scan(p: &Page) {
-    let folders = scan_folders(&p.shared);
+    let roots = roots();
+    let folders = scan_folders(&p.shared, &roots);
     if p.state.borrow().busy {
         return;
     }
+    p.state.borrow_mut().roots = roots.clone();
     p.state.borrow_mut().scanned = folders.clone();
     p.state.borrow_mut().journal_seen = journal_changed();
-    if folders.is_empty() {
+    if folders.is_empty() && (roots.nas.is_none() || roots.nas_online) {
         // Nothing to scan: forget clips from folders that were removed.
         let _ = Library::open_default().and_then(|l| l.retain(&HashSet::new()));
         p.state.borrow_mut().clips.clear();
@@ -884,31 +1003,38 @@ fn start_scan(p: &Page) {
             archive: a,
             run_database: p.shared.settings().run_database.clone(),
         });
-    let _ = p.tx.send(Command::Scan(folders, backup_to));
+    let _ = p.tx.send(Command::Scan(folders, roots, backup_to));
 }
 
 /// The clips "Make proxies" would work on: the ticked ones, or else every
-/// readable clip without a good proxy.
-fn proxy_queue(s: &State) -> Vec<(PathBuf, MediaInfo)> {
+/// readable clip without a good proxy. A NAS clip gets one only while it has
+/// a local copy (the proxy goes beside that).
+fn proxy_queue(s: &State) -> Vec<(PathBuf, PathBuf, MediaInfo)> {
     s.clips
         .iter()
         .filter(|c| s.selected.is_empty() || s.selected.contains(&c.path))
         .filter(|c| !matches!(c.proxy, ProxyState::Ready(_)))
-        .filter_map(|c| Some((c.path.clone(), c.info.clone()?)))
+        .filter(|c| !s.roots.on_nas(&c.path) || c.local.is_some())
+        .filter_map(|c| Some((c.path.clone(), c.editable().to_owned(), c.info.clone()?)))
         .collect()
 }
 
 fn confirm_proxies(p: &Page) {
     let queue = proxy_queue(&p.state.borrow());
     if queue.is_empty() {
-        p.status.set_text("Every clip here already has a proxy.");
+        p.status.set_text(
+            "Every clip here with a local copy already has a proxy (clips only on the NAS get one with a local copy).",
+        );
         return;
     }
-    let seconds: f64 = queue.iter().filter_map(|(_, i)| i.duration_seconds).sum();
+    let seconds: f64 = queue
+        .iter()
+        .filter_map(|(_, _, i)| i.duration_seconds)
+        .sum();
     // ProRes 422 Proxy runs about 45 Mb/s at 1920x1080, 29.97 fps.
     let bytes: f64 = queue
         .iter()
-        .map(|(_, i)| {
+        .map(|(_, _, i)| {
             let (w, h) = proxy::proxy_size(i);
             let rate = 45e6 / 8.0 * f64::from(w * h) / (1920.0 * 1080.0) * i.fps() / 29.97;
             rate * i.duration_seconds.unwrap_or(0.0)
@@ -934,7 +1060,7 @@ fn confirm_proxies(p: &Page) {
         }
         let mut s = p2.state.borrow_mut();
         s.busy = true;
-        s.queued = queue.iter().map(|(path, _)| path.clone()).collect();
+        s.queued = queue.iter().map(|(path, _, _)| path.clone()).collect();
         drop(s);
         refill(&p2);
         let _ = p2.tx.send(Command::Proxies(queue.clone()));
@@ -1014,7 +1140,7 @@ const COLUMNS: &[(&str, i32, usize)] = &[
     ("Recorded", 175, 1),
     ("Length", 70, 2),
     ("Proxy", 90, 4),
-    ("NAS", 110, 8),
+    ("Stored", 120, 8),
     ("Video", 190, 3),
     ("Folder", 200, 7),
 ];
@@ -1082,6 +1208,7 @@ fn table(p: &Page) -> gtk::ColumnView {
             let s = page.state.borrow();
             let (text, tip) = cell(&s, &clip, index);
             let backup_class = match s.backups.get(&clip.path) {
+                _ if s.roots.on_nas(&clip.path) => Some("success"),
                 Some(Backup::OnNas { .. } | Backup::IsOriginal { .. }) => Some("success"),
                 Some(Backup::LocalOnly) => Some("warning"),
                 Some(Backup::Missing { .. }) => Some("error"),
@@ -1192,6 +1319,10 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                 ProxyState::Ready(p) => ("Ready".into(), Some(p.display().to_string())),
                 ProxyState::Failed(e) => ("Failed".into(), Some(e.clone())),
                 ProxyState::Missing if info.is_none() => (String::new(), None),
+                ProxyState::Missing if s.roots.on_nas(&clip.path) && clip.local.is_none() => (
+                    String::new(),
+                    Some("Made with a local copy, when the clip is pulled down to edit".into()),
+                ),
                 ProxyState::Missing => ("None".into(), None),
             }
         }
@@ -1228,6 +1359,7 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
             Some(r) => (lap_text(r), None),
             None => (String::new(), None),
         },
+        8 if s.roots.on_nas(&clip.path) => nas_text(s, clip),
         8 => backup_text(s.backups.get(&clip.path)),
         _ => {
             let folder = clip.path.parent().unwrap_or(Path::new(""));
@@ -1502,7 +1634,25 @@ fn button(title: &str) -> gtk::Button {
 }
 
 fn safe(s: &State, clip: &Path) -> bool {
-    s.backups.get(clip).is_some_and(Backup::is_safe)
+    s.roots.on_nas(clip) || s.backups.get(clip).is_some_and(Backup::is_safe)
+}
+
+/// The Stored column for a clip whose original is on the NAS.
+fn nas_text(s: &State, clip: &Clip) -> (String, Option<String>) {
+    let mut tip = format!("Original on the NAS: {}", clip.path.display());
+    if !s.roots.nas_online {
+        tip.push_str("\nThe NAS isn't mounted now: shown as last catalogued.");
+    }
+    if clip.preview.is_none() {
+        tip.push_str("\nNo preview yet: it's made after the next scan.");
+    }
+    match &clip.local {
+        Some(local) => (
+            "NAS · copy here".into(),
+            Some(format!("{tip}\nLocal copy to edit: {}", local.display())),
+        ),
+        None => ("NAS".into(), Some(tip)),
+    }
 }
 
 /// The NAS column: whether the clip's original is verified there.
@@ -1547,15 +1697,31 @@ fn short_time(stamp: &str) -> String {
     t.get(..16).unwrap_or(&t).to_owned()
 }
 
+/// The NAS footage root and the local root, from Import's settings; the NAS
+/// counts as online only while it's mounted as it was set up.
+pub fn roots() -> Roots {
+    let import = ingest::settings::Settings::load().unwrap_or_default();
+    Roots {
+        nas_online: import
+            .archive
+            .as_ref()
+            .is_some_and(|a| ingest::storage::Root::destination(a).is_ok()),
+        nas: import.archive.map(|a| a.path),
+        local: import.editing.map(|e| e.path),
+        catalog: library::preview::dir(),
+    }
+}
+
 /// The folders a scan covers: the footage folders, plus Import's editing
-/// destination, so imported clips show up without adding it by hand.
-fn scan_folders(shared: &Shared) -> Vec<PathBuf> {
+/// destination, so imported clips show up without adding it by hand, and the
+/// NAS footage root while it's mounted.
+fn scan_folders(shared: &Shared, roots: &Roots) -> Vec<PathBuf> {
     let mut folders = shared.settings().footage_folders.clone();
-    if let Ok(import) = ingest::settings::Settings::load()
-        && let Some(editing) = import.editing
-        && !folders.iter().any(|f| editing.path.starts_with(f))
-    {
-        folders.push(editing.path);
+    let nas = roots.nas.as_ref().filter(|_| roots.nas_online);
+    for root in [roots.local.as_ref(), nas].into_iter().flatten() {
+        if !folders.iter().any(|f| root.starts_with(f)) {
+            folders.push(root.clone());
+        }
     }
     folders
 }
