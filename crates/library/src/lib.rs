@@ -25,6 +25,7 @@ pub mod catalog_backup;
 pub mod footage;
 pub mod frames;
 pub mod hydrate;
+pub mod kinds;
 pub mod organise;
 pub mod overlays;
 pub mod preview;

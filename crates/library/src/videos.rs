@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use crate::store::{Clip, Library};
 
@@ -59,7 +60,41 @@ impl Status {
     }
 }
 
-/// A clip in a video: which part, and whether its run's timer goes on.
+/// A card a kind puts between clips (`crate::kinds`): a title, an end, or
+/// a course's personal bests on a chart. Ghost Run draws it as a still and
+/// makes a short clip of it when the video is built.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Card {
+    pub kind: CardKind,
+    pub text: String,
+    #[serde(default)]
+    pub subtitle: String,
+    pub seconds: f64,
+    /// The course a chart is of.
+    #[serde(default)]
+    pub course: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CardKind {
+    Title,
+    End,
+    Chart,
+}
+
+impl CardKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            CardKind::Title => "Title card",
+            CardKind::End => "End card",
+            CardKind::Chart => "Personal bests chart",
+        }
+    }
+}
+
+/// A clip in a video: which part, and whether its run's timer goes on. Or a
+/// card, with no clip.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Item {
     /// The clip's key.
@@ -71,6 +106,8 @@ pub struct Item {
     pub frames: i64,
     /// The run whose timer overlay goes over it, if any.
     pub timer: Option<String>,
+    /// A card instead of a clip (`clip` and `path` empty).
+    pub card: Option<Card>,
 }
 
 impl Item {
@@ -82,6 +119,14 @@ impl Item {
             first_frame: 0,
             frames: frames(clip),
             timer: None,
+            card: None,
+        }
+    }
+
+    pub fn card(card: Card) -> Self {
+        Item {
+            card: Some(card),
+            ..Item::default()
         }
     }
 }
@@ -215,6 +260,7 @@ fn keys_of<'a>(v: &'a Video, usage: &'a HashMap<i64, Vec<Use>>) -> HashSet<&'a s
     }
     used.into_iter()
         .chain(v.items.iter().map(|i| i.clip.as_str()))
+        .filter(|k| !k.is_empty())
         .collect()
 }
 
@@ -251,7 +297,7 @@ pub fn freeable(video: i64, videos: &[Video], usage: &HashMap<i64, Vec<Use>>) ->
         .flatten()
         .map(|u| u.clip.as_str())
         .chain(v.items.iter().map(|i| i.clip.as_str()))
-        .filter(|k| !needed.contains(k))
+        .filter(|k| !k.is_empty() && !needed.contains(k))
         .map(str::to_owned)
         .collect()
 }
@@ -278,6 +324,7 @@ impl Library {
                first_frame INTEGER NOT NULL,
                frames INTEGER NOT NULL,
                timer TEXT,
+               card TEXT,
                PRIMARY KEY (video, position)
              );
              CREATE TABLE IF NOT EXISTS video_usage (
@@ -288,6 +335,13 @@ impl Library {
                frames INTEGER NOT NULL
              );",
         )?;
+        // Schema 8 had no cards.
+        let has_card: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('video_items') WHERE name = 'card'")?
+            .exists([])?;
+        if !has_card {
+            db.execute_batch("ALTER TABLE video_items ADD COLUMN card TEXT;")?;
+        }
         Ok(())
     }
 
@@ -330,7 +384,7 @@ impl Library {
             return Ok(None);
         };
         let mut stmt = self.db.prepare(
-            "SELECT clip, path, first_frame, frames, timer FROM video_items
+            "SELECT clip, path, first_frame, frames, timer, card FROM video_items
              WHERE video = ?1 ORDER BY position",
         )?;
         video.items = stmt
@@ -341,6 +395,9 @@ impl Library {
                     first_frame: r.get(2)?,
                     frames: r.get(3)?,
                     timer: r.get(4)?,
+                    card: r
+                        .get::<_, Option<String>>(5)?
+                        .and_then(|j| serde_json::from_str(&j).ok()),
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -386,7 +443,9 @@ impl Library {
         tx.execute("DELETE FROM video_items WHERE video = ?1", [video])?;
         for (position, i) in items.iter().enumerate() {
             tx.execute(
-                "INSERT INTO video_items VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO video_items
+                   (video, position, clip, path, first_frame, frames, timer, card)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     video,
                     position as i64,
@@ -394,7 +453,8 @@ impl Library {
                     i.path.to_string_lossy(),
                     i.first_frame,
                     i.frames,
-                    i.timer
+                    i.timer,
+                    i.card.as_ref().map(serde_json::to_string).transpose()?
                 ],
             )?;
         }
@@ -410,7 +470,7 @@ impl Library {
             .items;
         let before = all.len();
         for i in items {
-            if !all.iter().any(|a| a.clip == i.clip) {
+            if i.card.is_some() || !all.iter().any(|a| a.clip == i.clip) {
                 all.push(i.clone());
             }
         }
@@ -597,6 +657,7 @@ mod tests {
             first_frame: 0,
             frames: 300,
             timer: timer.map(Into::into),
+            card: None,
         }
     }
 

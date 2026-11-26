@@ -25,6 +25,9 @@ pub struct AppSettings {
     /// Past this many GB of local copies of NAS clips, the Library suggests
     /// removing some (default [`LOCAL_COPIES_GB`]).
     pub local_copies_gb: Option<u32>,
+    /// A folder of video kinds (`*.toml`, `library::kinds`) replacing or
+    /// adding to the built-in ones.
+    pub kinds_folder: Option<PathBuf>,
 }
 
 /// The default for [`AppSettings::local_copies_gb`].
@@ -120,6 +123,7 @@ mod tests {
             comparison: Comparison::Optimal,
             resolve_container: Some("resolve".into()),
             local_copies_gb: Some(80),
+            kinds_folder: Some("/home/x/kinds".into()),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);

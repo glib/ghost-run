@@ -249,6 +249,26 @@ fn point_text(points: &[Point], i: usize) -> String {
     text
 }
 
+/// Draws the trend chart (as on the page) into `cr`, `w` × `h`: for a
+/// video's chart card (`cards`).
+pub fn paint(
+    points: Vec<Point>,
+    target: Option<f64>,
+    cr: &cairo::Context,
+    w: f64,
+    h: f64,
+) -> Result<(), cairo::Error> {
+    let mut chart = Chart {
+        points,
+        target,
+        drawn: Vec::new(),
+    };
+    draw(&mut chart, cr, w, h)
+}
+
+pub const CHART_SURFACE: (f64, f64, f64) = SURFACE;
+pub const CHART_INK: (f64, f64, f64) = INK;
+
 fn rgb(cr: &cairo::Context, (r, g, b): (f64, f64, f64)) {
     cr.set_source_rgb(r, g, b);
 }

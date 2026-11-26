@@ -1,0 +1,34 @@
+# A video kind (decision 0005); see trail.toml for what can go in one.
+
+id = "speed-progression"
+name = "Speed progression"
+description = "Getting faster on one course: the first run, each new best, the latest, then the bests on a chart."
+input = "course"
+title = "{course}: getting faster"
+
+[[section]]
+type = "title"
+text = "{course}"
+subtitle = "{first_date} to {latest_date}: {faster} faster"
+seconds = 3
+
+[[section]]
+type = "runs"
+# "progression": the first counted run, each new personal best, the latest.
+# "all": every counted run in the order ridden.
+pick = "progression"
+part = "timed"
+lead_in = 2.0
+lead_out = 2.0
+timer = "on"
+
+[[section]]
+type = "chart"
+text = "Personal bests on {course}"
+seconds = 5
+
+[[section]]
+type = "end"
+text = "{best}"
+subtitle = "Best on {course} so far"
+seconds = 3
