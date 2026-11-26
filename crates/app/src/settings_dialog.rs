@@ -119,6 +119,30 @@ pub fn open(shared: &Shared) {
         "A local folder: copies Resolve edits smoothly, kept in the same folders as the originals.",
         false,
     ));
+    let limit = adw::SpinRow::with_range(5.0, 5000.0, 5.0);
+    limit.set_title("Suggest removing local copies past (GB)");
+    limit.set_subtitle(
+        "Local copies of NAS clips are for editing. Past this, the Library suggests removing the ones you're done with.",
+    );
+    limit.set_value(f64::from(
+        shared
+            .settings()
+            .local_copies_gb
+            .unwrap_or(library::settings::LOCAL_COPIES_GB),
+    ));
+    let shared2 = shared.clone();
+    limit.connect_value_notify(move |row| {
+        let gb = row.value().round() as u32;
+        if shared2
+            .settings()
+            .local_copies_gb
+            .unwrap_or(library::settings::LOCAL_COPIES_GB)
+            != gb
+        {
+            let _ = shared2.update(|s| s.local_copies_gb = Some(gb));
+        }
+    });
+    import.add(&limit);
     let resolve = adw::PreferencesGroup::new();
     resolve.set_title("DaVinci Resolve");
     resolve.set_description(Some(
