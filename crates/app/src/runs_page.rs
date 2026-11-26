@@ -1,5 +1,7 @@
-//! The Leaderboards page (`runs` in the sidebar's names): a leaderboard per
-//! course from the run database, with best and optimal laps and sector times,
+//! The Tracks page (`runs` in the sidebar's names): the courses ridden most
+//! lately first (`timer_core::tracks`), and for the one picked its personal
+//! best, target and trend (`tracks_view.rs`) over its leaderboard from the run
+//! database, with best and optimal laps and sector times,
 //! and batch edits (move to another course, ignore, delete) plus rendering and
 //! Resolve for the ticked runs. Courses are added and renamed in the Library's
 //! Courses panel. Edits are saved at once through
@@ -17,8 +19,10 @@ use timer_core::board::{BoardRow, CourseBoard, RunStatus, course_board};
 use timer_core::edit::{self, EditError};
 use timer_core::file::{DatabaseFile, SaveError};
 use timer_core::timing::{format_delta, format_duration};
+use timer_core::tracks::{CourseSummary, history, ridden_most, sector_gaps};
 
 use crate::shared::{Change, Shared};
+use crate::tracks_view::{TrackView, parse_target};
 
 struct State {
     file: Option<DatabaseFile>,
@@ -34,8 +38,8 @@ struct Page {
     banner: gtk::Box,
     banner_text: gtk::Label,
     body: gtk::Box,
-    courses: gtk::DropDown,
-    course_ids: Rc<RefCell<Vec<String>>>,
+    course_list: gtk::ListBox,
+    track: TrackView,
     /// Set while the course list is refilled, so its change signal is ignored.
     filling: Rc<std::cell::Cell<bool>>,
     summary: gtk::Label,
@@ -49,7 +53,7 @@ struct Page {
 pub fn page(shared: &Shared) -> gtk::Widget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Leaderboards", "")));
+    header.set_title_widget(Some(&adw::WindowTitle::new("Tracks", "")));
     let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
     reload.set_tooltip_text(Some("Reload the run database"));
     header.pack_end(&reload);
@@ -71,16 +75,32 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     banner.append(&create);
     content.append(&banner);
 
-    let body = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    // The courses on the left, ridden most lately first; the picked one on
+    // the right.
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     body.set_vexpand(true);
-    let course_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let courses = gtk::DropDown::from_strings(&[]);
-    courses.update_property(&[gtk::accessible::Property::Label("Course")]);
-    course_row.append(&courses);
-    body.append(&course_row);
+    let side = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    side.add_css_class("course-panel");
+    side.append(&label("Ridden most lately", "heading"));
+    let course_list = gtk::ListBox::new();
+    course_list.add_css_class("navigation-sidebar");
+    course_list.update_property(&[gtk::accessible::Property::Label("Courses")]);
+    let course_scroll = gtk::ScrolledWindow::builder()
+        .child(&course_list)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_width(250)
+        .build();
+    side.append(&course_scroll);
+    body.append(&side);
+    body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    main.set_hexpand(true);
     let summary = label("", "heading");
     summary.set_wrap(true);
-    body.append(&summary);
+    main.append(&summary);
+    let track = TrackView::new();
+    main.append(&track.root);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     actions.add_css_class("locations");
@@ -109,13 +129,14 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         actions.append(w);
     }
     actions.set_visible(false);
-    body.append(&actions);
+    main.append(&actions);
 
     let table_holder = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .min_content_height(160)
         .build();
-    body.append(&table_holder);
+    main.append(&table_holder);
+    body.append(&main);
     content.append(&body);
     root.append(&content);
 
@@ -138,8 +159,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         banner,
         banner_text,
         body,
-        courses: courses.clone(),
-        course_ids: Rc::default(),
+        course_list: course_list.clone(),
+        track: track.clone(),
         filling: Rc::default(),
         summary,
         table_holder,
@@ -159,11 +180,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         p.status.set_text("Reloaded.");
     });
     let p = page.clone();
-    courses.connect_selected_notify(move |d| {
+    course_list.connect_row_selected(move |_, row| {
         if p.filling.get() {
             return;
         }
-        let id = p.course_ids.borrow().get(d.selected() as usize).cloned();
+        let id = row.map(|r| r.widget_name().to_string());
         if id.is_some() && id != p.state.borrow().course {
             let mut s = p.state.borrow_mut();
             s.course = id;
@@ -172,6 +193,10 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             show(&p);
         }
     });
+    let p = page.clone();
+    track
+        .target_button
+        .connect_clicked(move |_| target_dialog(&p));
     let p = page.clone();
     move_to.connect_clicked(move |_| move_dialog(&p));
     let p = page.clone();
@@ -242,14 +267,11 @@ fn load(p: &Page) {
             .map(|db| db.courses.iter().map(|c| c.id.clone()).collect())
             .unwrap_or_default();
     if !s.course.as_ref().is_some_and(|c| ids.contains(c)) {
-        // Default to the course ridden most recently.
+        // Default to the course ridden most lately.
         s.course = s.db.as_ref().and_then(|db| {
-            db.runs
-                .iter()
-                .filter(|r| ids.contains(&r.course_id))
-                .max_by_key(|r| timer_core::matching::run_order_time(r))
-                .map(|r| r.course_id.clone())
-                .or_else(|| ids.first().cloned())
+            ridden_most(db, chrono::Utc::now())
+                .first()
+                .map(|c| c.course.id.clone())
         });
     }
     drop(s);
@@ -263,31 +285,20 @@ fn show(p: &Page) {
     p.body.set_visible(s.db.is_some());
     let Some(db) = &s.db else { return };
 
-    let names: Vec<String> = db
-        .courses
-        .iter()
-        .map(|c| {
-            let runs = db.runs.iter().filter(|r| r.course_id == c.id).count();
-            format!(
-                "{} ({} {})",
-                c.name,
-                runs,
-                if runs == 1 { "run" } else { "runs" }
-            )
-        })
-        .collect();
-    *p.course_ids.borrow_mut() = db.courses.iter().map(|c| c.id.clone()).collect();
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let position = s
-        .course
-        .as_ref()
-        .and_then(|c| db.courses.iter().position(|x| &x.id == c));
-    let model = gtk::StringList::new(&names);
+    let now = chrono::Utc::now();
+    let order = ridden_most(db, now);
+    let current = s.course.clone();
     drop(s);
     p.filling.set(true);
-    p.courses.set_model(Some(&model));
-    if let Some(i) = position {
-        p.courses.set_selected(i as u32);
+    while let Some(row) = p.course_list.first_child() {
+        p.course_list.remove(&row);
+    }
+    for c in &order {
+        let row = course_row(c);
+        p.course_list.append(&row);
+        if current.as_ref() == Some(&c.course.id) {
+            p.course_list.select_row(Some(&row));
+        }
     }
     p.filling.set(false);
     let s = p.state.borrow();
@@ -305,6 +316,16 @@ fn show(p: &Page) {
     };
     let board = course_board(course, &db.runs);
     p.summary.set_text(&summary(&board));
+    let target = library::Library::open_default()
+        .and_then(|l| l.target(&course.id))
+        .unwrap_or_default();
+    p.track.show(
+        order.iter().find(|c| c.course.id == course.id),
+        history(&board, &db.runs),
+        &sector_gaps(&board, &db.runs),
+        target,
+        now,
+    );
     let rows: Vec<glib::BoxedAnyObject> = board
         .rows
         .iter()
@@ -634,4 +655,84 @@ fn button(title: &str) -> gtk::Button {
     let b = gtk::Button::with_label(title);
     b.add_css_class("ingest-action");
     b
+}
+
+/// A course in the list: its name, then its PB and how often it's been ridden lately.
+fn course_row(c: &CourseSummary) -> gtk::ListBoxRow {
+    let lines = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    lines.set_margin_top(6);
+    lines.set_margin_bottom(6);
+    let name = label(&c.course.name, "");
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    lines.append(&name);
+    let mut detail = Vec::new();
+    if let Some(b) = &c.best {
+        detail.push(format!("PB {}", time(b.lap_seconds)));
+    }
+    detail.push(match c.recent_runs {
+        0 if c.runs == 0 => "no runs yet".to_owned(),
+        0 => "not ridden lately".to_owned(),
+        1 => "1 run lately".to_owned(),
+        n => format!("{n} runs lately"),
+    });
+    let detail = detail.join(" · ");
+    lines.append(&label(&detail, "dim-label"));
+    let row = gtk::ListBoxRow::new();
+    row.set_child(Some(&lines));
+    row.set_widget_name(&c.course.id);
+    row.update_property(&[gtk::accessible::Property::Label(&format!(
+        "{}, {detail}",
+        c.course.name
+    ))]);
+    row
+}
+
+/// Sets or clears the course's target lap time (kept in the library, not the
+/// run database).
+fn target_dialog(p: &Page) {
+    let Some(course) = p.state.borrow().course.clone() else {
+        return;
+    };
+    let library = match library::Library::open_default() {
+        Ok(l) => l,
+        Err(e) => {
+            p.status
+                .set_text(&format!("Library could not be opened: {e:#}"));
+            return;
+        }
+    };
+    let current = library.target(&course).unwrap_or_default();
+    let entry = gtk::Entry::new();
+    entry.set_placeholder_text(Some("2:31.4"));
+    if let Some(t) = current {
+        entry.set_text(&time(t));
+    }
+    entry.set_activates_default(true);
+    let dialog = adw::AlertDialog::new(
+        Some("Target lap time"),
+        Some("The time you're chasing on this course. Leave it empty for none."),
+    );
+    dialog.set_extra_child(Some(&entry));
+    dialog.add_responses(&[("cancel", "Cancel"), ("save", "Save")]);
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    let page = p.clone();
+    dialog.connect_response(None, move |_, response| {
+        if response != "save" {
+            return;
+        }
+        match parse_target(&entry.text())
+            .map_err(anyhow::Error::msg)
+            .and_then(|t| {
+                library.set_target(&course, t)?;
+                Ok(t)
+            }) {
+            Ok(Some(t)) => page.status.set_text(&format!("Target set: {}.", time(t))),
+            Ok(None) => page.status.set_text("Target cleared."),
+            Err(e) => page.status.set_text(&format!("{e:#}")),
+        }
+        show(&page);
+    });
+    let window = p.course_list.root().and_downcast::<gtk::Window>();
+    dialog.present(window.as_ref());
 }
