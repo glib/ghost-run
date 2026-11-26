@@ -10,7 +10,7 @@ Import (the merged resolve-ingest app), Library, Runs, Markers, Output/Resolve.
 What comes next is `docs/decisions/0005-workspaces-and-hydrated-footage.md`
 (issues #32–#38): workspaces per job (Inbox, Library, Videos, Tracks), the
 originals kept only on the NAS with a local catalog, footage hydrated per
-video, video kinds as templates, usage tracking, Strava.
+video, video kinds as templates, usage tracking, Strava. It's done in three stages (A: footage on the NAS and catalogued, the new import; B: Videos, Library organising, the first two kinds; C: the other kinds, overlay styles, Strava), tracked as GitHub milestones.
 The timing workflow is still a Python script inside DaVinci Resolve Studio. It is moving to a
 standalone Rust tool (`docs/decisions/0001-standalone-rust-tool.md`): an overlay
 rendered to one transparent video file, then markers found automatically from
@@ -64,6 +64,7 @@ sensible option and list assumptions in the PR description.
 - `tests/` — unittest; Resolve is faked, so everything runs without it.
 - `examples/` — example database and markers CSV (made-up runs).
 - `docs/decisions/` — short ADRs for significant choices. Add one when you make one.
+- `docs/agents/` — prompts for one-off jobs Liam runs with a Claude agent on the desktop (which has the NAS and real footage): `tidy-footage.md` sorts the NAS share into the footage layout and clears local copies already on the NAS.
 - `PLAN.md` — the original design and status of the Python tool.
 
 ## Conventions
