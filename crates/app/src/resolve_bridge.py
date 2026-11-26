@@ -296,10 +296,24 @@ def unused_name(taken, name):
     return "%s %d" % (name, n)
 
 
+def overlay_span(first, frames, overlay_first, overlay_frames):
+    """Where an overlay goes over a clip used from clip frame `first` for
+    `frames` frames, when the overlay starts at clip frame `overlay_first` and
+    lasts `overlay_frames`: (offset from the item's start, first overlay frame,
+    length), or None if they don't overlap."""
+    start = max(first, overlay_first)
+    end = min(first + frames, overlay_first + overlay_frames)
+    if end <= start:
+        return None
+    return start - first, start - overlay_first, end - start
+
+
 def new_project(resolve, request):
-    """A new project with the runs back to back: each run's clip on V1 (with
-    its audio), from a second before Start to the end of its overlay, and the
-    overlay above it on V2; proxies linked."""
+    """A new project with the runs (or clips) back to back: each one's clip on
+    V1 (with its audio), the part from `first_frame` for `frames`, and its
+    overlay, if it has one, above it on V2 where it falls in that part
+    (`overlay_first_frame`/`overlay_frames`; by default the overlay starts
+    with the part and is as long); proxies linked."""
     runs = request.get("runs", [])
     if not runs:
         raise BridgeError("bad_request", "no runs to put in the project")
@@ -347,13 +361,18 @@ def new_project(resolve, request):
             notes.append("%s: Resolve refused to add the clip" % clip_name)
             continue
         overlay = run.get("overlay")
-        if overlay and os.path.isfile(overlay):
+        span = overlay_span(first, frames, int(run.get("overlay_first_frame", first)),
+                            int(run.get("overlay_frames", frames)))
+        if overlay and os.path.isfile(overlay) and span is None:
+            notes.append("%s: its timed part isn't in the part used" % clip_name)
+        elif overlay and os.path.isfile(overlay):
+            offset, start, length = span
             item = import_overlay(media_pool, overlays_bin, overlay)
             if not media_pool.AppendToTimeline([{
                 "mediaPoolItem": item,
-                "startFrame": 0,
-                "endFrame": frames - 1,
-                "recordFrame": record,
+                "startFrame": start,
+                "endFrame": start + length - 1,
+                "recordFrame": record + offset,
                 "trackIndex": 2,
                 "mediaType": 1,
             }]):

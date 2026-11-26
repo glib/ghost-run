@@ -1,5 +1,5 @@
 //! The window's frame (decision 0005's workspaces): a sidebar listing the
-//! pages (Inbox, Library, Tracks; Videos comes with stage B), the page shown,
+//! pages (Inbox, Library, Videos, Tracks), the page shown,
 //! and the jobs drawer (renders and Resolve sends, `output_page`) over its
 //! right edge, opened from the sidebar's Jobs row.
 
@@ -10,7 +10,7 @@ use adw::prelude::*;
 /// bar), opened over the new Import page.
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
-    let pages: [(&str, &str, &str, gtk::Widget); 3] = [
+    let pages: [(&str, &str, &str, gtk::Widget); 4] = [
         (
             "import",
             "Inbox",
@@ -22,6 +22,12 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
             "Library",
             "folder-videos-symbolic",
             crate::library_page::page(&shared),
+        ),
+        (
+            "videos",
+            "Videos",
+            "media-playback-start-symbolic",
+            crate::videos_page::page(&shared),
         ),
         (
             "runs",
@@ -116,14 +122,20 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         }
         split2.set_show_content(true);
     });
-    // A clip picked to be timed opens over the Library (library_page); runs
-    // sent to render or to Resolve open the drawer.
+    // A clip picked to be timed opens over the Library (library_page), a
+    // video shown the Videos page; runs or videos sent to render or to
+    // Resolve open the drawer.
     let (list2, drawer2) = (list.clone(), drawer.clone());
     shared.subscribe(move |change| match change {
         crate::shared::Change::TimeClip | crate::shared::Change::ShowLibrary => {
             select(&list2, "library");
         }
-        crate::shared::Change::Render | crate::shared::Change::Resolve => {
+        crate::shared::Change::ShowVideo => {
+            select(&list2, "videos");
+        }
+        crate::shared::Change::Render
+        | crate::shared::Change::Resolve
+        | crate::shared::Change::BuildVideo => {
             drawer2.set_show_sidebar(true);
         }
         _ => {}

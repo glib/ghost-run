@@ -365,6 +365,40 @@ class NewProjectTests(unittest.TestCase):
         self.assertTrue(v1[0].mpi.proxy.endswith("a.mov"))
         self.assertEqual(self.resolve.saved, 1)
 
+    def test_an_overlay_goes_where_its_run_is_in_a_whole_clip(self):
+        runs = [
+            # A whole 600-frame clip whose run's overlay starts at frame 200.
+            {"clip": self.file("a.MP4"), "proxy": None, "overlay": self.file("a.overlay.mov"),
+             "first_frame": 0, "frames": 600, "overlay_first_frame": 200,
+             "overlay_frames": 300},
+            # Used from frame 100 for 100 frames; its overlay starts at 50.
+            {"clip": self.file("b.MP4"), "proxy": None, "overlay": self.file("b.overlay.mov"),
+             "first_frame": 100, "frames": 100, "overlay_first_frame": 50,
+             "overlay_frames": 120},
+            # The run isn't in the part used.
+            {"clip": self.file("c.MP4"), "proxy": None, "overlay": self.file("c.overlay.mov"),
+             "first_frame": 0, "frames": 100, "overlay_first_frame": 400,
+             "overlay_frames": 50},
+        ]
+        reply = bridge.handle({"command": "new_project", "name": "Clips", "runs": runs},
+                              lambda: self.resolve)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["placed"], 3)
+        self.assertEqual(reply["notes"], ["c.MP4: its timed part isn't in the part used"])
+        v1, v2 = self.resolve.projects["Clips"].timeline.tracks
+        self.assertEqual([(i.start, i.end, i.left) for i in v1],
+                         [(86400, 87000, 0), (87000, 87100, 100), (87100, 87200, 0)])
+        # a: at 86400 + 200, all 300 frames; b: from the item's start, overlay
+        # frame 50 onward for the 70 frames left of it.
+        self.assertEqual([(i.start, i.end, i.left) for i in v2],
+                         [(86600, 86900, 0), (87000, 87070, 50)])
+
+    def test_overlay_spans(self):
+        self.assertEqual(bridge.overlay_span(0, 600, 200, 300), (200, 0, 300))
+        self.assertEqual(bridge.overlay_span(100, 100, 50, 120), (0, 50, 70))
+        self.assertEqual(bridge.overlay_span(30, 300, 30, 300), (0, 0, 300))
+        self.assertIsNone(bridge.overlay_span(0, 100, 100, 10))
+
     def test_names_never_clash(self):
         self.assertEqual(bridge.unused_name({"A", "A 2"}, "A"), "A 3")
         self.assertEqual(bridge.unused_name(set(), "A"), "A")

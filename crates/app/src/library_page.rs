@@ -297,6 +297,10 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             ("Clear flag", ""),
             ("Tags…", "Add or remove the ticked clips' tags"),
             ("Add to collection…", "Put the ticked clips in a collection"),
+            (
+                "Add to video…",
+                "Put the ticked clips in a video, to build in Resolve",
+            ),
             ("Remove from this collection", ""),
             (
                 "Move runs to course…",
@@ -304,7 +308,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             ),
         ],
     );
-    let move_course = organise_items[6].clone();
+    let move_course = organise_items[7].clone();
     organise.set_tooltip_text(Some("Flag, tag or collect the ticked clips"));
     let untick = gtk::Button::from_icon_name("edit-clear-symbolic");
     untick.add_css_class("flat");
@@ -435,12 +439,13 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         stop: stop.clone(),
         course_list: course_list.clone(),
         rename: rename.clone(),
-        uncollect: organise_items[5].clone(),
+        uncollect: organise_items[6].clone(),
         thumbs_tx: thumbs_worker(replies_for_thumbs),
         pictures: Rc::default(),
         filling: Rc::default(),
     };
-    for (i, item) in organise_items.iter().enumerate() {
+    // Move runs to course… (the last) has its own handler.
+    for (i, item) in organise_items[..7].iter().enumerate() {
         let p = page.clone();
         item.connect_clicked(move |_| organise_ticked(&p, i));
     }
@@ -561,7 +566,11 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     shared.subscribe(move |change| {
         match change {
-            Change::TimeClip | Change::Render | Change::Resolve => return,
+            Change::TimeClip
+            | Change::Render
+            | Change::Resolve
+            | Change::BuildVideo
+            | Change::ShowVideo => return,
             // After an import, show what needs checking.
             Change::ShowLibrary => {
                 if !p.state.borrow().drafted.is_empty() {
@@ -1668,7 +1677,7 @@ fn draft_text(s: &State, d: &Draft) -> (String, Option<String>) {
 
 /// The name a stored run would know the clip by: an editing copy
 /// (`clip.MP4.mov`) is the original (`clip.MP4`).
-fn run_key(path: &Path) -> String {
+pub fn run_key(path: &Path) -> String {
     let name = path
         .file_name()
         .unwrap_or_default()
@@ -2199,6 +2208,7 @@ fn organise_ticked(p: &Page, item: usize) {
             });
             apply(result);
         }),
+        5 => add_to_video(p, ticked_items(p)),
         _ => {
             if let View::Collection(id) = view {
                 apply(
@@ -2209,6 +2219,73 @@ fn organise_ticked(p: &Page, item: usize) {
             }
         }
     }
+}
+
+/// The ticked clips as video items, in the order recorded: whole, with the
+/// timer on for a committed run.
+fn ticked_items(p: &Page) -> Vec<library::videos::Item> {
+    let runs = crate::videos_page::runs(&p.shared);
+    let s = p.state.borrow();
+    let mut ticked: Vec<&Clip> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path))
+        .collect();
+    ticked.sort_by(|a, b| (&a.recorded, &a.path).cmp(&(&b.recorded, &b.path)));
+    ticked
+        .into_iter()
+        .map(|c| library::videos::Item {
+            timer: runs.get(&run_key(&c.path)).map(|r| r.id.clone()),
+            ..library::videos::Item::whole(c)
+        })
+        .collect()
+}
+
+/// Asks which video `items` go in (a new one, or one not published yet) and
+/// adds them; a new video opens on the Videos page.
+fn add_to_video(p: &Page, items: Vec<library::videos::Item>) {
+    let videos = match Library::open_default().and_then(|l| l.videos()) {
+        Ok(v) => v,
+        Err(e) => {
+            p.status
+                .set_text(&format!("The videos couldn't be read: {e:#}"));
+            return;
+        }
+    };
+    let open: Vec<(i64, String)> = videos
+        .into_iter()
+        .filter(|v| v.status != library::videos::Status::Published)
+        .map(|v| (v.id, v.title))
+        .collect();
+    let p2 = p.clone();
+    crate::organise_ui::video_dialog(&p.shared, items.len(), open, move |id, title| {
+        let result = Library::open_default().and_then(|l| {
+            let id = match id {
+                Some(id) => id,
+                None => l.new_video(&title, "clips")?,
+            };
+            Ok((id, l.add_items(id, &items)?))
+        });
+        match result {
+            Ok((video, added)) => {
+                let skipped = items.len() - added;
+                p2.status.set_text(&format!(
+                    "Added {added} {} to {title}{}.",
+                    plural(added, "clip", "clips"),
+                    if skipped > 0 {
+                        format!(" ({skipped} already in it)")
+                    } else {
+                        String::new()
+                    }
+                ));
+                p2.shared.videos_changed();
+                if id.is_none() {
+                    p2.shared.show_video(video);
+                }
+            }
+            Err(e) => p2.status.set_text(&format!("Not added: {e:#}")),
+        }
+    });
 }
 
 /// Renames the course, ride or collection shown.

@@ -1,8 +1,8 @@
 //! The library database (`$XDG_DATA_HOME/ghost-run/library.sqlite3`): one row
 //! per clip found in the footage folders, which a rescan finds again, and
 //! what only Liam can say about them, which it can't: marker drafts, course
-//! references and targets, and [`crate::organise`]'s tags, flags,
-//! collections and ride names. It's copied to the NAS daily
+//! references and targets, [`crate::organise`]'s tags, flags,
+//! collections and ride names, and [`crate::videos`]. It's copied to the NAS daily
 //! ([`crate::catalog_backup`]).
 
 use std::path::{Path, PathBuf};
@@ -77,8 +77,8 @@ pub struct Library {
 
 /// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
 /// 5: course target times. 6: clips' local copy and preview. 7: tags, flags,
-/// collections and ride names.
-const VERSION: u32 = 7;
+/// collections and ride names. 8: videos, their clips and usage.
+const VERSION: u32 = 8;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -146,6 +146,7 @@ impl Library {
             )?;
         }
         Self::create_organise_tables(&db)?;
+        Self::create_video_tables(&db)?;
         db.pragma_update(None, "user_version", VERSION)?;
         Ok(Self { db })
     }

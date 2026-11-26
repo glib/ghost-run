@@ -396,7 +396,13 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             load_database(&p);
             show(&p);
         }
-        Change::Render | Change::Resolve | Change::ShowLibrary | Change::Imported => {}
+        Change::Render
+        | Change::Resolve
+        | Change::ShowLibrary
+        | Change::Imported
+        | Change::Videos
+        | Change::BuildVideo
+        | Change::ShowVideo => {}
     });
 
     let p = page.clone();

@@ -15,6 +15,7 @@ mod shell;
 mod time_page;
 mod tracks_view;
 mod ui;
+mod videos_page;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};

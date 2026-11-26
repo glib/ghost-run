@@ -43,6 +43,8 @@ enum Reply {
     Finished(String, Result<Rendered, String>),
     /// What Resolve said: its status, or what adding overlays did.
     Resolve(Result<String, String>),
+    /// A video was built in Resolve (or wasn't, and why).
+    VideoBuilt(Result<String, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -68,6 +70,8 @@ struct Item {
 enum Send {
     Timeline,
     NewProject(String),
+    /// A video, by its id in the catalog (`library::videos`).
+    Video(i64),
 }
 
 struct State {
@@ -326,6 +330,11 @@ pub fn page(shared: &Shared, activity: gtk::Label, close: impl Fn() + 'static) -
             p.state.borrow_mut().running = true;
             next(&p);
         }
+        if change == Change::BuildVideo
+            && let Some(id) = p.shared.take_video_to_build()
+        {
+            build_video(&p, id);
+        }
         if change == Change::Resolve
             && let Some((target, ids)) = p.shared.take_runs_for_resolve()
             && !ids.is_empty()
@@ -451,6 +460,22 @@ fn handle(p: &Page, reply: Reply) {
             drop(s);
             next(p);
             settle(p);
+        }
+        Reply::VideoBuilt(result) => {
+            p.resolve_buttons.set_sensitive(true);
+            match result {
+                Ok(text) => {
+                    p.resolve_status.remove_css_class("error");
+                    p.resolve_status.set_text(&text);
+                }
+                Err(text) => {
+                    p.resolve_status.add_css_class("error");
+                    p.resolve_status
+                        .set_text(&format!("The video wasn't built: {text}"));
+                }
+            }
+            p.shared.videos_changed();
+            show(p);
         }
         Reply::Resolve(result) => {
             p.resolve_buttons.set_sensitive(true);
@@ -578,6 +603,134 @@ fn make_project(p: &Page, name: String, mut items: Vec<(String, PathBuf, PathBuf
     });
 }
 
+/// Builds a video: renders the timer overlays it wants that are missing or
+/// out of date, then copies its NAS clips here and makes its Resolve project
+/// ([`make_video`]).
+fn build_video(p: &Page, id: i64) {
+    let video = match Library::open_default().and_then(|l| l.video(id)) {
+        Ok(Some(v)) => v,
+        Ok(None) => return,
+        Err(e) => {
+            p.resolve_status.add_css_class("error");
+            p.resolve_status
+                .set_text(&format!("The video couldn't be read: {e:#}"));
+            return;
+        }
+    };
+    let timers: Vec<String> = video.items.iter().filter_map(|i| i.timer.clone()).collect();
+    if timers.is_empty() {
+        make_video(p, id);
+    } else {
+        begin(p, Send::Video(id), timers);
+    }
+}
+
+/// Makes a video's Resolve project on a thread: its clips copied down from
+/// the NAS first where they have no local copy.
+fn make_video(p: &Page, id: i64) {
+    let container = p.shared.settings().resolve_container.clone();
+    let tx = p.replies.clone();
+    p.resolve_buttons.set_sensitive(false);
+    p.resolve_status.remove_css_class("error");
+    p.resolve_status
+        .set_text("Building the video in Resolve (copying any clip only on the NAS here first)…");
+    std::thread::spawn(move || {
+        let bridge = crate::resolve::Bridge::new(container.as_deref());
+        let result = create_video(&bridge, id).map_err(|e| format!("{e:#}"));
+        let _ = tx.send(Reply::VideoBuilt(result));
+    });
+}
+
+/// A video's clips as the bridge's `new_project` wants them, in order, with
+/// overlays where a timer is wanted and rendered; then the project, and the
+/// video marked In Resolve with its usage recorded.
+fn create_video(bridge: &crate::resolve::Bridge, id: i64) -> anyhow::Result<String> {
+    use library::videos::{Status as VideoStatus, Use};
+    let library = Library::open_default()?;
+    let mut video = library
+        .video(id)?
+        .ok_or_else(|| anyhow::anyhow!("the video isn't in the catalog any more"))?;
+    let clips = library.clips()?;
+    let renders = library.renders()?;
+    let mut runs = Vec::new();
+    let mut uses = Vec::new();
+    let mut missing = Vec::new();
+    let mut format = None;
+    for item in &video.items {
+        let clip = clips
+            .iter()
+            .find(|c| library::organise::key(c) == item.clip)
+            .or_else(|| clips.iter().find(|c| c.path == item.path));
+        let Some(clip) = clip else {
+            missing.push(
+                item.path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            continue;
+        };
+        if format.is_none() {
+            format = clip.info.clone();
+        }
+        let (file, proxy) = ensure_local(&library, &clips, &clip.path)?;
+        let mut run = serde_json::json!({
+            "clip": file, "proxy": proxy,
+            "first_frame": item.first_frame, "frames": item.frames,
+        });
+        if let Some(r) = item
+            .timer
+            .as_ref()
+            .and_then(|t| renders.get(t))
+            .filter(|r| r.overlay.exists())
+            && let Some(frames) = library::probe::probe(&r.overlay)
+                .ok()
+                .and_then(|i| i.frames)
+        {
+            run["overlay"] = serde_json::json!(r.overlay);
+            run["overlay_first_frame"] = serde_json::json!(r.first_frame);
+            run["overlay_frames"] = serde_json::json!(frames);
+        }
+        runs.push(run);
+        uses.push(Use {
+            video: id,
+            clip: item.clip.clone(),
+            first_frame: item.first_frame,
+            frames: item.frames,
+        });
+    }
+    let info = format.ok_or_else(|| anyhow::anyhow!("none of its clips is in the Library"))?;
+    let (width, height) = if info.rotation.rem_euclid(180) == 90 {
+        (info.height, info.width)
+    } else {
+        (info.width, info.height)
+    };
+    let reply = bridge.request(&serde_json::json!({
+        "command": "new_project",
+        "name": video.title,
+        "fps": timer_render::job::trim(info.fps()),
+        "width": width,
+        "height": height,
+        "runs": runs,
+    }))?;
+    video.project = reply["project"].as_str().map(str::to_owned);
+    video.timeline = reply["timeline"].as_str().map(str::to_owned);
+    if video.status == VideoStatus::Planned {
+        video.status = VideoStatus::InResolve;
+    }
+    library.save_video(&video)?;
+    library.set_usage(id, "built", &uses)?;
+    let mut text = describe_project(&reply, ("clip", "clips"));
+    if !missing.is_empty() {
+        text.push_str(&format!(
+            " Not in the Library, so left out: {}.",
+            missing.join(", ")
+        ));
+    }
+    Ok(text)
+}
+
 /// Runs sent to Resolve: lists them, renders the ones without an up-to-date
 /// overlay, and sends them all once those are done ([`settle`]).
 fn begin(p: &Page, send: Send, ids: Vec<String>) {
@@ -643,6 +796,12 @@ fn settle(p: &Page) {
         return;
     }
     let (send, ids) = s.pending.take().expect("checked");
+    if let Send::Video(id) = send {
+        // Clips go in whether or not their overlays could be rendered.
+        drop(s);
+        make_video(p, id);
+        return;
+    }
     let items: Vec<_> = s
         .items
         .iter()
@@ -667,6 +826,7 @@ fn settle(p: &Page) {
     match send {
         Send::Timeline => ask_resolve(p, Some(items)),
         Send::NewProject(name) => make_project(p, name, items),
+        Send::Video(_) => unreachable!("handled above"),
     }
 }
 
@@ -763,7 +923,7 @@ fn create_project(
         "height": height,
         "runs": runs,
     }))?;
-    Ok(describe_project(&reply))
+    Ok(describe_project(&reply, ("run", "runs")))
 }
 
 /// The file Resolve should use for a clip, and its proxy: for an original on
@@ -806,12 +966,12 @@ fn ready_proxy(clips: &[library::Clip], clip: &std::path::Path) -> Option<PathBu
         })
 }
 
-fn describe_project(reply: &serde_json::Value) -> String {
+fn describe_project(reply: &serde_json::Value, noun: (&str, &str)) -> String {
     let placed = reply["placed"].as_u64().unwrap_or(0);
     let mut text = format!(
         "Made project {} with {placed} {} on timeline {}.",
         reply["project"].as_str().unwrap_or("?"),
-        if placed == 1 { "run" } else { "runs" },
+        if placed == 1 { noun.0 } else { noun.1 },
         reply["timeline"].as_str().unwrap_or("?"),
     );
     let notes: Vec<&str> = reply["notes"]
@@ -1260,7 +1420,7 @@ mod tests {
         let reply = json!({"ok": true, "project": "Ghost Run 2026-11-24 2", "timeline": "Ghost Run 2026-11-24 2",
             "placed": 2, "notes": ["c.MP4: the clip is missing"]});
         assert_eq!(
-            describe_project(&reply),
+            describe_project(&reply, ("run", "runs")),
             "Made project Ghost Run 2026-11-24 2 with 2 runs on timeline Ghost Run 2026-11-24 2. c.MP4: the clip is missing."
         );
     }
