@@ -99,6 +99,15 @@ pub fn open(shared: &Shared) {
         |s, v| s.overlay_folder = v,
         ("Folder", &[]),
     ));
+    files.add(&file_row(
+        shared,
+        &mut subscriptions,
+        "Video kinds folder",
+        "Your own kinds (*.toml, like the examples in Ghost Run's kinds folder), replacing the built-in ones with the same id. Not set: the built-in Trail and Speed progression.",
+        |s| s.kinds_folder.clone(),
+        |s, v| s.kinds_folder = v,
+        ("Folder", &[]),
+    ));
     let import = adw::PreferencesGroup::new();
     import.set_title("Import");
     import.set_description(Some(

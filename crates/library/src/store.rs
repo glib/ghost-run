@@ -77,8 +77,9 @@ pub struct Library {
 
 /// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
 /// 5: course target times. 6: clips' local copy and preview. 7: tags, flags,
-/// collections and ride names. 8: videos, their clips and usage.
-const VERSION: u32 = 8;
+/// collections and ride names. 8: videos, their clips and usage. 9: cards
+/// in videos.
+const VERSION: u32 = 9;
 
 impl Library {
     pub fn open_default() -> Result<Self> {

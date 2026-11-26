@@ -629,6 +629,7 @@ fn build_video(p: &Page, id: i64) {
 /// the NAS first where they have no local copy.
 fn make_video(p: &Page, id: i64) {
     let container = p.shared.settings().resolve_container.clone();
+    let run_database = p.shared.settings().run_database.clone();
     let tx = p.replies.clone();
     p.resolve_buttons.set_sensitive(false);
     p.resolve_status.remove_css_class("error");
@@ -636,15 +637,21 @@ fn make_video(p: &Page, id: i64) {
         .set_text("Building the video in Resolve (copying any clip only on the NAS here first)…");
     std::thread::spawn(move || {
         let bridge = crate::resolve::Bridge::new(container.as_deref());
-        let result = create_video(&bridge, id).map_err(|e| format!("{e:#}"));
+        let result =
+            create_video(&bridge, id, run_database.as_deref()).map_err(|e| format!("{e:#}"));
         let _ = tx.send(Reply::VideoBuilt(result));
     });
 }
 
 /// A video's clips as the bridge's `new_project` wants them, in order, with
 /// overlays where a timer is wanted and rendered; then the project, and the
-/// video marked In Resolve with its usage recorded.
-fn create_video(bridge: &crate::resolve::Bridge, id: i64) -> anyhow::Result<String> {
+/// video marked In Resolve with its usage recorded. Cards are drawn and made
+/// into clips first (`cards`), at the size and rate of the first clip.
+fn create_video(
+    bridge: &crate::resolve::Bridge,
+    id: i64,
+    run_database: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
     use library::videos::{Status as VideoStatus, Use};
     let library = Library::open_default()?;
     let mut video = library
@@ -655,13 +662,53 @@ fn create_video(bridge: &crate::resolve::Bridge, id: i64) -> anyhow::Result<Stri
     let mut runs = Vec::new();
     let mut uses = Vec::new();
     let mut missing = Vec::new();
-    let mut format = None;
-    for item in &video.items {
-        let clip = clips
+    let find = |item: &library::videos::Item| {
+        clips
             .iter()
             .find(|c| library::organise::key(c) == item.clip)
-            .or_else(|| clips.iter().find(|c| c.path == item.path));
-        let Some(clip) = clip else {
+            .or_else(|| clips.iter().find(|c| c.path == item.path))
+    };
+    let info = video
+        .items
+        .iter()
+        .filter(|i| i.card.is_none())
+        .find_map(|i| find(i).and_then(|c| c.info.clone()))
+        .ok_or_else(|| anyhow::anyhow!("none of its clips is in the Library"))?;
+    let (width, height) = if info.rotation.rem_euclid(180) == 90 {
+        (info.height, info.width)
+    } else {
+        (info.width, info.height)
+    };
+    let cards_dir = library::settings::data_dir()
+        .join("cards")
+        .join(id.to_string());
+    let db = run_database.and_then(|p| timer_core::TimerDatabase::load(p).ok());
+    for (index, item) in video.items.iter().enumerate() {
+        if let Some(card) = &item.card {
+            let chart = card
+                .course
+                .as_deref()
+                .zip(db.as_ref())
+                .and_then(|(course, db)| {
+                    let course = db.course_by_id(course).ok()?;
+                    let board = timer_core::board::course_board(course, &db.runs);
+                    let target = library.target(&course.id).ok().flatten();
+                    Some((timer_core::tracks::history(&board, &db.runs), target))
+                });
+            let file = cards_dir.join(format!("{index:02}-{:?}.mov", card.kind).to_lowercase());
+            let frames = crate::cards::make(
+                card,
+                (width as i32, height as i32),
+                &format!("{}/{}", info.fps_num, info.fps_den),
+                chart,
+                &file,
+            )?;
+            runs.push(serde_json::json!({
+                "clip": file, "proxy": null, "first_frame": 0, "frames": frames,
+            }));
+            continue;
+        }
+        let Some(clip) = find(item) else {
             missing.push(
                 item.path
                     .file_name()
@@ -671,9 +718,6 @@ fn create_video(bridge: &crate::resolve::Bridge, id: i64) -> anyhow::Result<Stri
             );
             continue;
         };
-        if format.is_none() {
-            format = clip.info.clone();
-        }
         let (file, proxy) = ensure_local(&library, &clips, &clip.path)?;
         let mut run = serde_json::json!({
             "clip": file, "proxy": proxy,
@@ -700,12 +744,6 @@ fn create_video(bridge: &crate::resolve::Bridge, id: i64) -> anyhow::Result<Stri
             frames: item.frames,
         });
     }
-    let info = format.ok_or_else(|| anyhow::anyhow!("none of its clips is in the Library"))?;
-    let (width, height) = if info.rotation.rem_euclid(180) == 90 {
-        (info.height, info.width)
-    } else {
-        (info.width, info.height)
-    };
     let reply = bridge.request(&serde_json::json!({
         "command": "new_project",
         "name": video.title,

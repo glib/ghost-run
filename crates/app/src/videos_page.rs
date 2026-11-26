@@ -53,6 +53,8 @@ struct State {
     read_back: HashSet<i64>,
     /// A bridge call is running.
     busy: bool,
+    /// Kind id → its name.
+    kinds: HashMap<String, String>,
     selected: Option<i64>,
     /// Clip key → the clip as catalogued.
     clips: HashMap<String, Clip>,
@@ -172,23 +174,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         show(&p);
     });
     let p = page.clone();
-    new.connect_clicked(move |_| {
-        let p2 = p.clone();
-        crate::organise_ui::name_dialog(
-            &p.shared,
-            "New video",
-            "Then tick its clips in the Library and choose Organise → Add to video….",
-            "",
-            None,
-            move |title| match Library::open_default().and_then(|l| l.new_video(&title, "clips")) {
-                Ok(id) => {
-                    p2.state.borrow_mut().selected = Some(id);
-                    p2.shared.videos_changed();
-                }
-                Err(e) => p2.status.set_text(&format!("Not made: {e:#}")),
-            },
-        );
-    });
+    new.connect_clicked(move |_| new_video_dialog(&p));
     let p = page.clone();
     shared.subscribe(move |change| match change {
         // After the widget that saved is done (it's rebuilt).
@@ -226,6 +212,11 @@ fn load(p: &Page) {
         .map(|c| (library::organise::key(&c), c))
         .collect();
     s.runs = runs(&p.shared);
+    s.kinds = library::kinds::all(p.shared.settings().kinds_folder.as_deref())
+        .0
+        .into_iter()
+        .map(|k| (k.id, k.name))
+        .collect();
     s.usage = usage;
     s.read_back = read_back;
     if !s
@@ -282,12 +273,18 @@ fn fill_list(p: &Page) {
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         line.append(&title);
         let sub = label(
-            &format!(
-                "{} · {} {}",
-                v.status.label(),
-                v.items.len(),
-                if v.items.len() == 1 { "clip" } else { "clips" }
-            ),
+            &{
+                let n = v.items.iter().filter(|i| i.card.is_none()).count();
+                let mut text = format!(
+                    "{} · {n} {}",
+                    v.status.label(),
+                    if n == 1 { "clip" } else { "clips" }
+                );
+                if let Some(kind) = s.kinds.get(&v.kind) {
+                    text = format!("{kind} · {text}");
+                }
+                text
+            },
             "dim-label",
         );
         sub.add_css_class("caption");
@@ -436,7 +433,11 @@ fn show(p: &Page) {
     p.detail.append(&about);
 
     let group = adw::PreferencesGroup::new();
-    group.set_title("Clips");
+    group.set_title(if video.items.iter().any(|i| i.card.is_some()) {
+        "Clips and cards"
+    } else {
+        "Clips"
+    });
     group.set_description(Some(if video.items.is_empty() {
         "None yet: tick clips in the Library and choose Organise → Add to video…."
     } else {
@@ -446,15 +447,33 @@ fn show(p: &Page) {
     for (index, item) in video.items.iter().enumerate() {
         let clip = s.clips.get(&item.clip);
         let row = adw::ActionRow::new();
+        if let Some(card) = &item.card {
+            row.set_title(card.kind.label());
+            let mut parts = vec![card.text.clone()];
+            if !card.subtitle.is_empty() {
+                parts.push(card.subtitle.clone());
+            }
+            parts.push(format!("{} s", card.seconds));
+            row.set_subtitle(&glib_escape(&parts.join(" · ")));
+            let edit = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit.add_css_class("flat");
+            edit.set_valign(gtk::Align::Center);
+            edit.set_tooltip_text(Some("Change its words and length"));
+            let (pp, card) = (p.clone(), card.clone());
+            edit.connect_clicked(move |_| edit_card(&pp, index, card.clone()));
+            row.add_suffix(&edit);
+        }
         let name = item
             .path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
-        row.set_title(&glib_escape(&name));
         let run = clip.and_then(|c| s.runs.get(&crate::library_page::run_key(&c.path)));
-        row.set_subtitle(&glib_escape(&item_text(item, clip, run)));
+        if item.card.is_none() {
+            row.set_title(&glib_escape(&name));
+            row.set_subtitle(&glib_escape(&item_text(item, clip, run)));
+        }
         if let Some(run) = run {
             let timer = gtk::Switch::new();
             timer.set_valign(gtk::Align::Center);
@@ -824,6 +843,221 @@ fn link_open_timeline(p: &Page) {
             Err(e) => Reply::Error(format!("Not linked: {e:#}")),
         }
     });
+}
+
+/// Asks for a card's words and length, and saves them.
+fn edit_card(p: &Page, index: usize, card: library::videos::Card) {
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let text = gtk::Entry::builder()
+        .text(&card.text)
+        .activates_default(true)
+        .build();
+    text.update_property(&[gtk::accessible::Property::Label("Text")]);
+    form.append(&text);
+    let subtitle = gtk::Entry::builder()
+        .text(&card.subtitle)
+        .placeholder_text("Smaller line under it (optional)")
+        .activates_default(true)
+        .build();
+    subtitle.update_property(&[gtk::accessible::Property::Label("Smaller line")]);
+    if card.kind != library::videos::CardKind::Chart {
+        form.append(&subtitle);
+    }
+    let seconds = gtk::SpinButton::with_range(1.0, 30.0, 0.5);
+    seconds.set_value(card.seconds);
+    seconds.update_property(&[gtk::accessible::Property::Label("Seconds")]);
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(&label("Seconds on screen", ""));
+    line.append(&seconds);
+    form.append(&line);
+    let pp = p.clone();
+    let focus = text.clone();
+    crate::courses::ask(
+        &p.shared,
+        card.kind.label(),
+        "What it says, and for how long.",
+        "Save",
+        Some(form.upcast_ref()),
+        Some(focus.upcast_ref()),
+        move || {
+            let mut changed = card.clone();
+            changed.text = text.text().trim().to_owned();
+            changed.subtitle = subtitle.text().trim().to_owned();
+            changed.seconds = seconds.value();
+            save_items(&pp, |items| {
+                if let Some(item) = items.get_mut(index) {
+                    item.card = Some(changed);
+                }
+            });
+        },
+    );
+}
+
+/// New video: clips picked in the Library, or a kind made from a run or a
+/// course (`library::kinds`).
+fn new_video_dialog(p: &Page) {
+    let settings = p.shared.settings().clone();
+    let (kinds, errors) = library::kinds::all(settings.kinds_folder.as_deref());
+    let db = settings
+        .run_database
+        .as_ref()
+        .and_then(|path| timer_core::TimerDatabase::load(path).ok())
+        .unwrap_or_default();
+    let laps: HashMap<String, f64> = db
+        .courses
+        .iter()
+        .flat_map(|c| timer_core::board::course_board(c, &db.runs).rows)
+        .filter_map(|r| Some((r.run_id.clone(), r.lap_seconds?)))
+        .collect();
+    let course_name = |id: &str| {
+        db.courses
+            .iter()
+            .find(|c| c.id == id)
+            .map_or(id.to_owned(), |c| c.name.clone())
+    };
+    let mut runs: Vec<&timer_core::models::RunRecord> = db
+        .runs
+        .iter()
+        .filter(|r| r.committed && !r.ignored)
+        .collect();
+    runs.sort_by(|a, b| (&b.date, &b.capture_time).cmp(&(&a.date, &a.capture_time)));
+    let run_choices: Vec<(String, String)> = runs
+        .iter()
+        .map(|r| {
+            let lap = laps
+                .get(&r.id)
+                .map(|l| format!(" · {}", library::kinds::lap_text(*l)))
+                .unwrap_or_default();
+            (
+                r.id.clone(),
+                format!("{} · {}{lap}", course_name(&r.course_id), r.date),
+            )
+        })
+        .collect();
+    let course_choices: Vec<(String, String)> = db
+        .courses
+        .iter()
+        .filter_map(|c| {
+            let n = runs.iter().filter(|r| r.course_id == c.id).count();
+            (n > 0).then(|| {
+                (
+                    c.id.clone(),
+                    format!("{} ({n} {})", c.name, if n == 1 { "run" } else { "runs" }),
+                )
+            })
+        })
+        .collect();
+
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let mut names = vec!["Clips you pick in the Library"];
+    names.extend(kinds.iter().map(|k| k.name.as_str()));
+    let kind = gtk::DropDown::from_strings(&names);
+    kind.update_property(&[gtk::accessible::Property::Label("Kind")]);
+    form.append(&kind);
+    let about = label("", "dim-label");
+    about.set_wrap(true);
+    about.set_max_width_chars(40);
+    form.append(&about);
+    let strings = |c: &[(String, String)]| {
+        gtk::DropDown::from_strings(&c.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>())
+    };
+    let run = strings(&run_choices);
+    run.update_property(&[gtk::accessible::Property::Label("Run")]);
+    form.append(&run);
+    let course = strings(&course_choices);
+    course.update_property(&[gtk::accessible::Property::Label("Course")]);
+    form.append(&course);
+    let title = gtk::Entry::builder().activates_default(true).build();
+    title.update_property(&[gtk::accessible::Property::Label("Title")]);
+    form.append(&title);
+    if !errors.is_empty() {
+        let e = label(&format!("Not read: {}", errors.join("; ")), "error");
+        e.set_wrap(true);
+        form.append(&e);
+    }
+    let kinds = Rc::new(kinds);
+    let show_kind = {
+        let (kinds, about, run, course, title) = (
+            kinds.clone(),
+            about.clone(),
+            run.clone(),
+            course.clone(),
+            title.clone(),
+        );
+        let (no_runs, no_courses) = (run_choices.is_empty(), course_choices.is_empty());
+        move |picked: u32| {
+            let k = (picked as usize).checked_sub(1).and_then(|i| kinds.get(i));
+            let input = k.map(|k| k.input);
+            about.set_text(&match k {
+                None => "Name it, then tick its clips in the Library and choose Organise → Add to video….".to_owned(),
+                Some(k) if input == Some(library::kinds::Input::Run) && no_runs => {
+                    format!("{} No stored runs yet: time one first.", k.description)
+                }
+                Some(k) if input == Some(library::kinds::Input::Course) && no_courses => {
+                    format!("{} No course has stored runs yet.", k.description)
+                }
+                Some(k) => k.description.clone(),
+            });
+            run.set_visible(input == Some(library::kinds::Input::Run));
+            course.set_visible(input == Some(library::kinds::Input::Course));
+            title.set_placeholder_text(Some(if k.is_some() {
+                "Title (leave empty for the kind's)"
+            } else {
+                "Title, e.g. Ridge laps, November"
+            }));
+        }
+    };
+    show_kind(0);
+    kind.connect_selected_notify(move |d| show_kind(d.selected()));
+    let pp = p.clone();
+    let (kind2, run2, course2, title2) = (kind.clone(), run.clone(), course.clone(), title.clone());
+    crate::courses::ask(
+        &p.shared,
+        "New video",
+        "",
+        "Make",
+        Some(form.upcast_ref()),
+        Some(title.upcast_ref()),
+        move || {
+            let typed = title2.text().trim().to_owned();
+            let picked = (kind2.selected() as usize)
+                .checked_sub(1)
+                .and_then(|i| kinds.get(i));
+            let made = (|| -> Result<i64> {
+                let library = Library::open_default()?;
+                let Some(k) = picked else {
+                    return library.new_video(&typed, "clips");
+                };
+                let input = match k.input {
+                    library::kinds::Input::Run => run_choices.get(run2.selected() as usize),
+                    library::kinds::Input::Course => {
+                        course_choices.get(course2.selected() as usize)
+                    }
+                }
+                .map(|(id, _)| id.clone())
+                .context("there's nothing to make it from yet")?;
+                let plan = library::kinds::plan(k, &input, &db, &library.clips()?)?;
+                let id = library.new_video(
+                    if typed.is_empty() {
+                        &plan.title
+                    } else {
+                        &typed
+                    },
+                    &k.id,
+                )?;
+                library.set_items(id, &plan.items)?;
+                Ok(id)
+            })();
+            match made {
+                Ok(id) => {
+                    pp.state.borrow_mut().selected = Some(id);
+                    pp.status.set_text("");
+                    pp.shared.videos_changed();
+                }
+                Err(e) => pp.status.set_text(&format!("Not made: {e:#}")),
+            }
+        },
+    );
 }
 
 /// An item's subtitle: when it was recorded, its length, and its run.

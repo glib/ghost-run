@@ -1,0 +1,33 @@
+# A video kind (decision 0005): what it's made from and the order of its
+# sections. Ghost Run carries these neutral examples; a folder of your own
+# (Settings → Videos → Kinds folder) can replace them by id or add more.
+#
+# Text can use: {course}, {date}, {lap}, {best}, {first_date},
+# {latest_date}, {runs} (how many runs it shows), {faster} (first lap less
+# the best).
+
+id = "trail"
+name = "Trail, no talking"
+description = "One run, start to finish: a title, the whole clip, an end card."
+# One run ("run"), or the runs on one course ("course").
+input = "run"
+title = "{course}"
+
+[[section]]
+type = "title"
+text = "{course}"
+subtitle = "{date}"
+seconds = 3
+
+[[section]]
+type = "runs"
+# "whole" clips, or the "timed" part with some lead-in and lead-out.
+part = "whole"
+# "on", "off", or "optional" (off to start with; switch it on per clip).
+timer = "optional"
+
+[[section]]
+type = "end"
+text = "{lap}"
+subtitle = "{course}"
+seconds = 3
