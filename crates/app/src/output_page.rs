@@ -1,5 +1,7 @@
-//! The Output page: a queue of runs whose timer overlays to render. Runs come
-//! from the Library or Tracks (Render overlays) or "Add runs without overlays"; each
+//! The jobs drawer (was the Output page; opened from the sidebar's Jobs row,
+//! and by itself when runs are sent here): a queue of runs whose timer
+//! overlays to render. Runs come
+//! from the Library or Tracks (Render overlays) or "Add unrendered"; each
 //! renders in turn on a worker thread, using every core the machine's memory
 //! allows ([`timer_render::encode::plan`]). A finished overlay is recorded in
 //! the library, so the Resolve bridge can find it.
@@ -95,13 +97,22 @@ struct Page {
     add_to_resolve: gtk::Button,
     new_project: gtk::Button,
     replies: mpsc::Sender<Reply>,
+    /// The sidebar's one-line summary of the jobs.
+    activity: gtk::Label,
 }
 
-pub fn page(shared: &Shared) -> gtk::Widget {
+/// The drawer's content. `activity` is kept to a short summary ("2 to
+/// render", "3 done"); `close` hides the drawer.
+pub fn page(shared: &Shared, activity: gtk::Label, close: impl Fn() + 'static) -> gtk::Widget {
     let (jobs, replies, reply_tx) = worker();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Output", "")));
+    header.set_title_widget(Some(&adw::WindowTitle::new("Jobs", "Overlays and Resolve")));
+    header.set_show_start_title_buttons(false);
+    let close_button = gtk::Button::from_icon_name("go-next-symbolic");
+    close_button.set_tooltip_text(Some("Hide jobs"));
+    close_button.connect_clicked(move |_| close());
+    header.pack_start(&close_button);
     root.append(&header);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -118,24 +129,27 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         "Best lap: the fastest run before this one. Optimal: the fastest of each sector before it, added up.",
     ));
     options.append(&compare);
+    content.append(&options);
+    let where_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let folder = label("", "dim-label");
     folder.set_hexpand(true);
-    folder.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
-    folder.set_margin_start(12);
-    options.append(&folder);
+    folder.set_wrap(true);
+    where_row.append(&folder);
     let change_folder = button("Change…");
+    change_folder.set_valign(gtk::Align::Center);
     change_folder.set_tooltip_text(Some("Choose where overlays go (Settings)"));
-    options.append(&change_folder);
-    content.append(&options);
+    where_row.append(&change_folder);
+    content.append(&where_row);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let add = button("Add runs without overlays");
+    let add = button("Add unrendered");
     add.set_tooltip_text(Some(
         "Queue every counted run whose overlay hasn't been rendered, or is out of date",
     ));
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
-    let clear = button("Clear finished");
+    let clear = button("Clear done");
+    clear.set_tooltip_text(Some("Take finished renders off the list"));
     let stop = button("Stop");
     stop.set_visible(false);
     let start = button("Render");
@@ -167,7 +181,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     views.add_named(&scroller, Some("list"));
     content.append(&views);
 
-    let resolve_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let resolve_row = gtk::Box::new(gtk::Orientation::Vertical, 8);
     resolve_row.add_css_class("locations");
     let resolve_text = gtk::Box::new(gtk::Orientation::Vertical, 2);
     resolve_text.set_hexpand(true);
@@ -177,7 +191,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     resolve_text.append(&resolve_status);
     resolve_row.append(&resolve_text);
     let resolve_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    resolve_buttons.set_valign(gtk::Align::Center);
+    resolve_buttons.set_halign(gtk::Align::End);
     let check = button("Check");
     check.set_tooltip_text(Some(
         "See whether Resolve is running and which project is open",
@@ -227,6 +241,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         add_to_resolve: add_to_resolve.clone(),
         new_project: new_project.clone(),
         replies: reply_tx,
+        activity,
     };
 
     compare.set_selected(match shared.settings().comparison {
@@ -1057,8 +1072,23 @@ fn show_folder(p: &Page) {
 }
 
 /// Rebuilds the list from the state.
+/// The sidebar's summary: what's left to render, else failures, else done.
+fn activity_text(items: &[Item]) -> String {
+    let count = |f: fn(&Status) -> bool| items.iter().filter(|i| f(&i.status)).count();
+    let left = count(|s| matches!(s, Status::Queued | Status::Rendering(_)));
+    let failed = count(|s| matches!(s, Status::Failed(_)));
+    let done = count(|s| matches!(s, Status::Done(_)));
+    match (left, failed, done) {
+        (0, 0, 0) => String::new(),
+        (0, 0, d) => format!("{d} done"),
+        (0, f, _) => format!("{f} failed"),
+        (l, _, _) => format!("{l} to render"),
+    }
+}
+
 fn show(p: &Page) {
     let s = p.state.borrow();
+    p.activity.set_text(&activity_text(&s.items));
     p.views
         .set_visible_child_name(if s.items.is_empty() { "empty" } else { "list" });
     while let Some(row) = p.list.first_child() {

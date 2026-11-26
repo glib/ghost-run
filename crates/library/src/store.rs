@@ -416,14 +416,38 @@ impl Library {
     }
 
     /// Clips with a draft, so the Library can show them.
-    pub fn drafted(&self) -> Result<std::collections::HashSet<PathBuf>> {
-        let mut stmt = self.db.prepare("SELECT path FROM drafts")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    /// Every clip's draft.
+    pub fn drafts(&self) -> Result<std::collections::HashMap<PathBuf, Draft>> {
+        let mut stmt = self
+            .db
+            .prepare("SELECT path, course_id, frames, confidence, source FROM drafts")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                Draft {
+                    course_id: r.get(1)?,
+                    frames: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
+                    confidence: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or_default(),
+                    source: r.get(4)?,
+                },
+            ))
+        })?;
         Ok(rows
             .collect::<rusqlite::Result<Vec<_>>>()?
             .into_iter()
-            .map(PathBuf::from)
+            .map(|(p, d)| (PathBuf::from(p), d))
             .collect())
+    }
+}
+
+impl Draft {
+    /// The auto-placed markers worth checking by eye (confidence under
+    /// [`crate::auto::CHECK_BELOW`]).
+    pub fn to_check(&self) -> usize {
+        self.confidence
+            .values()
+            .filter(|c| **c < crate::auto::CHECK_BELOW)
+            .count()
     }
 }
 
@@ -518,8 +542,14 @@ mod tests {
             source: "auto".into(),
         };
         lib.set_draft(clip, &draft).unwrap();
-        assert_eq!(lib.draft(clip).unwrap(), Some(draft));
-        assert!(lib.drafted().unwrap().contains(clip));
+        assert_eq!(lib.draft(clip).unwrap(), Some(draft.clone()));
+        assert_eq!(lib.drafts().unwrap().get(clip), Some(&draft));
+        assert_eq!(draft.to_check(), 0);
+        let unsure = Draft {
+            confidence: [("Start".to_owned(), 0.8), ("Finish".to_owned(), 0.1)].into(),
+            ..draft.clone()
+        };
+        assert_eq!(unsure.to_check(), 1);
         lib.clear_draft(clip).unwrap();
         assert_eq!(lib.draft(clip).unwrap(), None);
     }

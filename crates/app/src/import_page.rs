@@ -1,4 +1,4 @@
-//! The Import page: camera card in, originals verified on the NAS, editing
+//! The Inbox page (was Import): camera card in, originals verified on the NAS, editing
 //! copies made, and a plain answer at the end. Cards are found from the mount
 //! table every couple of seconds (`ingest::cards`), so a card is picked up
 //! however often it's reinserted; a folder can be imported instead. The
@@ -172,7 +172,7 @@ pub fn page(shared: &Shared, advanced: gtk::Widget) -> gtk::Widget {
     nav.add(
         &adw::NavigationPage::builder()
             .child(&main)
-            .title("Import")
+            .title("Inbox")
             .tag("import")
             .build(),
     );
@@ -182,7 +182,10 @@ pub fn page(shared: &Shared, advanced: gtk::Widget) -> gtk::Widget {
 fn view(shared: &Shared, open_advanced: impl Fn() + 'static) -> gtk::Widget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Import", "")));
+    header.set_title_widget(Some(&adw::WindowTitle::new(
+        "Inbox",
+        "New footage: card to NAS",
+    )));
     let advanced = gtk::Button::with_label("History and recovery");
     advanced.set_tooltip_text(Some(
         "Earlier imports, retrying or cleaning up after them, reports, and converting files already on disk",

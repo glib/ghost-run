@@ -107,7 +107,7 @@ struct State {
     view: View,
     runs_error: Option<String>,
     /// Clips with markers placed but not committed.
-    drafted: HashSet<PathBuf>,
+    drafted: HashMap<PathBuf, Draft>,
     selected: HashSet<PathBuf>,
     making: HashSet<PathBuf>,
     queued: HashSet<PathBuf>,
@@ -333,7 +333,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             courses: Vec::new(),
             view: View::All,
             runs_error: None,
-            drafted: HashSet::new(),
+            drafted: HashMap::new(),
             selected: HashSet::new(),
             making: HashSet::new(),
             queued: HashSet::new(),
@@ -990,7 +990,7 @@ fn start_auto_for(p: &Page, paths: &[PathBuf], quiet: bool) {
         .iter()
         .filter(|c| paths.contains(&c.path) && c.info.is_some())
         .filter(|c| {
-            let done = s.runs.contains_key(&run_key(&c.path)) || s.drafted.contains(&c.path);
+            let done = s.runs.contains_key(&run_key(&c.path)) || s.drafted.contains_key(&c.path);
             skipped += usize::from(done);
             !done
         })
@@ -1239,7 +1239,7 @@ fn refresh_controls(p: &Page) {
     p.to_resolve.set_sensitive(runs > 0);
     let why = (runs == 0).then_some("None of the ticked clips is timed yet: time them first");
     p.render.set_tooltip_text(Some(
-        why.unwrap_or("Render the ticked clips' timer overlays (on the Output page)"),
+        why.unwrap_or("Render the ticked clips' timer overlays (in Jobs)"),
     ));
     p.to_resolve.set_tooltip_text(Some(why.unwrap_or(
         "Put the ticked clips' runs in DaVinci Resolve, rendering any overlay that's missing or out of date first",
@@ -1479,7 +1479,8 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
         }
         5 => {
             let run = s.runs.get(&run_key(&clip.path));
-            let drafted = s.drafted.contains(&clip.path);
+            let draft = s.drafted.get(&clip.path);
+            let drafted = draft.is_some();
             match run {
                 Some(r) => {
                     let mut text = r.course.clone();
@@ -1496,14 +1497,10 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                     };
                     (text, Some(tip))
                 }
-                None if drafted => (
-                    "Draft".into(),
-                    Some(
-                        "Markers placed, not committed yet: double-click to check and commit"
-                            .into(),
-                    ),
-                ),
-                None => (String::new(), None),
+                None => match draft {
+                    Some(d) => draft_text(s, d),
+                    None => (String::new(), None),
+                },
             }
         }
         6 => match s.runs.get(&run_key(&clip.path)) {
@@ -1519,6 +1516,31 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                 Some(folder.display().to_string()),
             )
         }
+    }
+}
+
+/// A draft's Course cell: its course and, for auto-placed markers, how many
+/// are worth checking by eye.
+fn draft_text(s: &State, d: &Draft) -> (String, Option<String>) {
+    let course = s
+        .courses
+        .iter()
+        .find(|(id, _)| *id == d.course_id)
+        .map_or("Draft", |(_, name)| name.as_str());
+    let tip = "Markers placed, not committed yet: double-click to check and commit";
+    match (d.source.as_str(), d.to_check()) {
+        ("auto", 0) => (
+            format!("{course}: looks right"),
+            Some(format!("{tip}. Auto-placed, all markers confident.")),
+        ),
+        ("auto", n) => (
+            format!("{course}: {n} to check"),
+            Some(format!(
+                "{tip}. Auto-place wasn't sure of {n} {}.",
+                plural(n, "marker", "markers")
+            )),
+        ),
+        _ => (format!("{course}: draft"), Some(tip.into())),
     }
 }
 
@@ -1543,7 +1565,7 @@ fn load_runs(p: &Page) {
     s.courses.clear();
     s.runs_error = None;
     s.drafted = Library::open_default()
-        .and_then(|l| l.drafted())
+        .and_then(|l| l.drafts())
         .unwrap_or_default();
     let Some(path) = path else { return };
     match timer_core::TimerDatabase::load(&path) {
@@ -1604,7 +1626,7 @@ fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
 /// Whether `clip` shows in `view`.
 fn shows(s: &State, view: &View, clip: &Clip) -> bool {
     if *view == View::Drafts {
-        return s.drafted.contains(&clip.path);
+        return s.drafted.contains_key(&clip.path);
     }
     let local = s.roots.on_nas(&clip.path) && clip.local.is_some();
     shown_in(
