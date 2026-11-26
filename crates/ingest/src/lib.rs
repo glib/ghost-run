@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("Ghost Run currently supports Linux only");
 
+pub mod cards;
 pub mod catalog;
 pub mod diagnostics;
 pub mod discovery;

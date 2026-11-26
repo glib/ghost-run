@@ -1,6 +1,8 @@
 //! Ghost Run: the desktop app (no arguments) and the headless import commands.
 
 mod courses;
+mod desktop;
+mod import_page;
 mod library_page;
 mod output_page;
 mod resolve;
