@@ -1,7 +1,11 @@
 //! The Library page: every clip in your footage folders, when it was recorded,
 //! whether it has a proxy, and which stored run (if any) it is: its course,
-//! lap and place. A Courses panel filters by course (or clips not timed yet)
-//! and adds and renames courses. Timing a clip opens the Time page over the
+//! lap and place. The panel beside it filters the table: views (not timed
+//! yet, not on the NAS, drafts, picks…), collections, tags, courses and rides
+//! (`library::organise`), and adds and renames courses, rides and
+//! collections. Ticked clips can be flagged, tagged and put in collections
+//! (the Organise menu). Each row shows a thumbnail, made on a thread of its
+//! own from the clip's proxy or preview where there is one. Timing a clip opens the Time page over the
 //! Library, with a back arrow.
 //!
 //! Clips whose original is on the NAS (Import's archive folder, the footage
@@ -27,6 +31,7 @@ use gtk::{gio, glib};
 use library::auto::{self, Reference};
 use library::backup::Backup;
 use library::footage::Roots;
+use library::organise::{self, Catalog, Flag, Ride};
 use library::scan::{self, Progress};
 use library::{Cancel, Clip, Draft, Library, MediaInfo, ProxyState, proxy};
 use timer_core::board::course_board;
@@ -65,6 +70,8 @@ enum Reply {
     Made(PathBuf),
     /// Whether each clip's original is on the NAS, after a scan.
     Backups(HashMap<PathBuf, Backup>),
+    /// A clip's thumbnail: the clip, the PNG.
+    Thumb(PathBuf, PathBuf),
     Done(String),
     Error(String),
 }
@@ -93,7 +100,13 @@ enum View {
     Local,
     /// Clips with markers placed but not committed.
     Drafts,
+    Picks,
+    Rejected,
     Course(String),
+    /// A ride, by its id ([`Ride::id`]).
+    Ride(String),
+    Collection(i64),
+    Tag(String),
 }
 
 struct State {
@@ -128,6 +141,13 @@ struct State {
     rescan_wanted: bool,
     /// The worker's current job is a scan.
     scanning: bool,
+    /// Tags, flags, collections, ride names.
+    catalog: Catalog,
+    rides: Vec<Ride>,
+    /// Clip path → its thumbnail, once made.
+    thumbs: HashMap<PathBuf, PathBuf>,
+    /// Asked for, not made yet.
+    thumbs_asked: HashSet<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -159,6 +179,11 @@ struct Page {
     stop: gtk::Button,
     course_list: gtk::ListBox,
     rename: gtk::Button,
+    uncollect: gtk::Button,
+    /// Clips whose thumbnails to make: path, file to read.
+    thumbs_tx: mpsc::Sender<(PathBuf, PathBuf)>,
+    /// The thumbnail pictures bound now, by clip path.
+    pictures: Rc<RefCell<HashMap<PathBuf, gtk::Picture>>>,
     /// Set while the course list is rebuilt, so its selection isn't taken as a click.
     filling: Rc<std::cell::Cell<bool>>,
 }
@@ -193,6 +218,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     let window = &shared.window;
     let (tx, commands) = mpsc::channel();
     let (replies, rx) = mpsc::channel();
+    let replies_for_thumbs = replies.clone();
     let cancel = Cancel::default();
     worker(commands, replies, cancel.clone());
 
@@ -253,8 +279,6 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     auto_place.set_tooltip_text(Some(
         "Find each ticked clip's course and place its markers from that course's reference run, as drafts to check and commit",
     ));
-    let move_course = button("Course…");
-    move_course.set_tooltip_text(Some("Move the ticked clips' runs to another course"));
     let render = button("Render overlays");
     let to_resolve = crate::resolve_menu::menu();
     let copy_here = button("Copy here");
@@ -265,21 +289,55 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     remove_local.set_tooltip_text(Some(
         "Remove the ticked clips' local copies and proxies; the originals stay on the NAS",
     ));
+    let (organise, organise_items) = crate::organise_ui::menu_button(
+        "Organise",
+        &[
+            ("Pick", "Flag the ticked clips as picks"),
+            ("Reject", "Flag the ticked clips as rejects"),
+            ("Clear flag", ""),
+            ("Tags…", "Add or remove the ticked clips' tags"),
+            ("Add to collection…", "Put the ticked clips in a collection"),
+            ("Remove from this collection", ""),
+            (
+                "Move runs to course…",
+                "Move the ticked clips' runs to another course",
+            ),
+        ],
+    );
+    let move_course = organise_items[6].clone();
+    organise.set_tooltip_text(Some("Flag, tag or collect the ticked clips"));
     let untick = gtk::Button::from_icon_name("edit-clear-symbolic");
     untick.add_css_class("flat");
     untick.set_tooltip_text(Some("Untick all"));
+    // The buttons wrap onto a second line when the window is narrow.
+    let ticked_flow = gtk::FlowBox::new();
+    ticked_flow.set_selection_mode(gtk::SelectionMode::None);
+    ticked_flow.set_hexpand(true);
+    ticked_flow.set_max_children_per_line(12);
+    ticked_flow.set_row_spacing(6);
+    ticked_flow.set_column_spacing(6);
+    ticked_label.set_hexpand(false);
+    ticked_label.set_wrap(false);
+    ticked_bar.append(&ticked_flow);
     for w in [
         ticked_label.upcast_ref::<gtk::Widget>(),
+        organise.upcast_ref(),
         auto_place.upcast_ref(),
         time.upcast_ref(),
-        move_course.upcast_ref(),
         render.upcast_ref(),
         to_resolve.button.upcast_ref(),
         copy_here.upcast_ref(),
         remove_local.upcast_ref(),
         untick.upcast_ref(),
     ] {
-        ticked_bar.append(w);
+        let child = gtk::FlowBoxChild::new();
+        child.set_focusable(false);
+        child.set_child(Some(w));
+        // A hidden button takes no room.
+        w.bind_property("visible", &child, "visible")
+            .sync_create()
+            .build();
+        ticked_flow.insert(&child, -1);
     }
     ticked_bar.set_visible(false);
     content.append(&ticked_bar);
@@ -287,7 +345,9 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     // The Courses panel: all clips, those not timed yet, and each course.
     let course_list = gtk::ListBox::new();
     course_list.add_css_class("navigation-sidebar");
-    course_list.update_property(&[gtk::accessible::Property::Label("Show clips by course")]);
+    course_list.update_property(&[gtk::accessible::Property::Label(
+        "Show clips by view, collection, tag, course or ride",
+    )]);
     let course_scroller = gtk::ScrolledWindow::builder()
         .child(&course_list)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -296,14 +356,14 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     let add_course = button("New…");
     add_course.set_tooltip_text(Some("Add a course"));
     let rename = button("Rename…");
-    rename.set_tooltip_text(Some("Rename the selected course"));
+    rename.set_tooltip_text(Some("Rename the selected course, ride or collection"));
     let course_buttons = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     course_buttons.set_homogeneous(true);
     course_buttons.append(&add_course);
     course_buttons.append(&rename);
     let course_panel = gtk::Box::new(gtk::Orientation::Vertical, 8);
     course_panel.set_size_request(180, -1);
-    course_panel.append(&label("Courses", "heading"));
+    course_panel.append(&label("Show", "heading"));
     course_panel.append(&course_scroller);
     course_panel.append(&course_buttons);
 
@@ -346,6 +406,10 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             pending_auto: Vec::new(),
             rescan_wanted: false,
             scanning: false,
+            catalog: Catalog::default(),
+            rides: Vec::new(),
+            thumbs: HashMap::new(),
+            thumbs_asked: HashSet::new(),
         })),
         store: store.clone(),
         tx,
@@ -371,8 +435,15 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         stop: stop.clone(),
         course_list: course_list.clone(),
         rename: rename.clone(),
+        uncollect: organise_items[5].clone(),
+        thumbs_tx: thumbs_worker(replies_for_thumbs),
+        pictures: Rc::default(),
         filling: Rc::default(),
     };
+    for (i, item) in organise_items.iter().enumerate() {
+        let p = page.clone();
+        item.connect_clicked(move |_| organise_ticked(&p, i));
+    }
 
     let table = table(&page);
     let scroller = gtk::ScrolledWindow::builder()
@@ -446,10 +517,9 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             "nas" => View::NotOnNas,
             "local" => View::Local,
             "drafts" => View::Drafts,
-            n => match n.strip_prefix("course:") {
-                Some(id) => View::Course(id.to_owned()),
-                None => View::All,
-            },
+            "picks" => View::Picks,
+            "rejected" => View::Rejected,
+            n => view_named(n),
         };
         let mut s = p.state.borrow_mut();
         if s.view != view {
@@ -473,18 +543,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         });
     });
     let p = page.clone();
-    rename.connect_clicked(move |_| {
-        let s = p.state.borrow();
-        let View::Course(id) = &s.view else { return };
-        let Some((id, name)) = s.courses.iter().find(|(c, _)| c == id).cloned() else {
-            return;
-        };
-        drop(s);
-        let p2 = p.clone();
-        crate::courses::rename_course(&p.shared, &id, &name, move |result| {
-            p2.status.set_text(&result.unwrap_or_else(|e| e));
-        });
-    });
+    rename.connect_clicked(move |_| rename_selected(&p));
     let p = page.clone();
     stop.connect_clicked(move |_| {
         p.cancel.store(true, Ordering::Relaxed);
@@ -550,7 +609,11 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     }
     // The library from last time shows at once; a scan then brings it up to date.
     match Library::open_default().and_then(|l| l.clips()) {
-        Ok(clips) => page.state.borrow_mut().clips = clips,
+        Ok(clips) => {
+            let mut s = page.state.borrow_mut();
+            s.rides = organise::rides(&clips, &s.catalog.ride_names);
+            s.clips = clips;
+        }
         Err(e) => page
             .status
             .set_text(&format!("Library could not be opened: {e:#}")),
@@ -1047,10 +1110,21 @@ fn handle(p: &Page, reply: Reply) {
             let present: HashSet<&PathBuf> = clips.iter().map(|c| &c.path).collect();
             s.selected.retain(|path| present.contains(path));
             s.local_bytes = library::hydrate::local_bytes(&clips, &s.roots);
+            s.rides = organise::rides(&clips, &s.catalog.ride_names);
             s.clips = clips;
             drop(s);
             fill_courses(p);
             refill(p);
+        }
+        Reply::Thumb(path, png) => {
+            if let Some(picture) = p.pictures.borrow().get(&path)
+                && *picture.widget_name() == *path.to_string_lossy()
+            {
+                picture.set_filename(Some(&png));
+            }
+            let mut s = p.state.borrow_mut();
+            s.thumbs_asked.remove(&path);
+            s.thumbs.insert(path, png);
         }
         Reply::Backups(backups) => {
             p.state.borrow_mut().backups = backups;
@@ -1247,7 +1321,12 @@ fn refresh_controls(p: &Page) {
     p.ticked_bar.set_visible(!s.selected.is_empty());
     p.ticked_label
         .set_text(&ticked_text(s.selected.len(), runs));
-    p.rename.set_sensitive(matches!(s.view, View::Course(_)));
+    p.rename.set_sensitive(matches!(
+        s.view,
+        View::Course(_) | View::Ride(_) | View::Collection(_)
+    ));
+    p.uncollect
+        .set_visible(matches!(s.view, View::Collection(_)));
     p.proxies.set_tooltip_text(Some(if s.selected.is_empty() {
         "Make a proxy for every clip without one"
     } else {
@@ -1285,7 +1364,8 @@ fn refill(p: &Page) {
 
 /// Title, width, and which cell ([`cell`]) each column shows, in order.
 const COLUMNS: &[(&str, i32, usize)] = &[
-    ("Clip", 240, 0),
+    ("Clip", 300, 0),
+    ("Tags", 200, 9),
     ("Course", 170, 5),
     ("Lap", 120, 6),
     ("Recorded", 175, 1),
@@ -1318,14 +1398,22 @@ fn table(p: &Page) -> gtk::ColumnView {
         factory.connect_setup(move |_, item| {
             let li = item.downcast_ref::<gtk::ListItem>().unwrap();
             let text = label("", if matches!(index, 4 | 8) { "status" } else { "" });
-            // Names and folders can be shortened; the rest is short and must show whole.
+            // Names, tags and folders can be shortened; the rest is short and must show whole.
             if matches!(index, 0 | 5 | 7) {
                 text.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            }
+            if index == 9 {
+                text.set_ellipsize(gtk::pango::EllipsizeMode::End);
             }
             if index == 0 {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 let check = gtk::CheckButton::new();
                 row.append(&check);
+                let picture = gtk::Picture::new();
+                picture.set_size_request(64, 36);
+                picture.set_content_fit(gtk::ContentFit::Cover);
+                picture.add_css_class("thumb");
+                row.append(&picture);
                 row.append(&text);
                 li.set_child(Some(&row));
                 let weak = li.downgrade();
@@ -1366,6 +1454,8 @@ fn table(p: &Page) -> gtk::ColumnView {
                 None => None,
             };
             let ticked = s.selected.contains(&clip.path);
+            let thumb = s.thumbs.get(&clip.path).cloned();
+            let ask_thumb = index == 0 && thumb.is_none() && !s.thumbs_asked.contains(&clip.path);
             // Let go first: ticking the box below runs its handler, which changes the state.
             drop(s);
             let label = if index == 0 {
@@ -1379,7 +1469,21 @@ fn table(p: &Page) -> gtk::ColumnView {
                     "Select {}",
                     clip.name()
                 ))]);
-                check.next_sibling().and_downcast::<gtk::Label>().unwrap()
+                let picture = check.next_sibling().and_downcast::<gtk::Picture>().unwrap();
+                // Named by its clip, so a late thumbnail for a recycled row is ignored.
+                picture.set_widget_name(&clip.path.to_string_lossy());
+                picture.set_filename(thumb.as_deref());
+                page.pictures
+                    .borrow_mut()
+                    .insert(clip.path.clone(), picture.clone());
+                if ask_thumb {
+                    page.state
+                        .borrow_mut()
+                        .thumbs_asked
+                        .insert(clip.path.clone());
+                    let _ = page.thumbs_tx.send((clip.path.clone(), clip.frames_from()));
+                }
+                row.last_child().and_downcast::<gtk::Label>().unwrap()
             } else {
                 li.child().and_downcast::<gtk::Label>().unwrap()
             };
@@ -1503,6 +1607,7 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                 },
             }
         }
+        9 => tags_text(s, clip),
         6 => match s.runs.get(&run_key(&clip.path)) {
             Some(r) => (lap_text(r), None),
             None => (String::new(), None),
@@ -1517,6 +1622,23 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
             )
         }
     }
+}
+
+/// The Tags cell: the flag, then the tags.
+fn tags_text(s: &State, clip: &Clip) -> (String, Option<String>) {
+    let key = organise::key(clip);
+    let mut parts: Vec<String> = Vec::new();
+    match s.catalog.flags.get(&key) {
+        Some(Flag::Pick) => parts.push("★ Pick".into()),
+        Some(Flag::Reject) => parts.push("✕ Reject".into()),
+        None => {}
+    }
+    if let Some(tags) = s.catalog.tags_of(&key) {
+        parts.extend(tags.iter().cloned());
+    }
+    let text = parts.join(" · ");
+    let tip = (!text.is_empty()).then(|| text.clone());
+    (text, tip)
 }
 
 /// A draft's Course cell: its course and, for auto-placed markers, how many
@@ -1567,6 +1689,19 @@ fn load_runs(p: &Page) {
     s.drafted = Library::open_default()
         .and_then(|l| l.drafts())
         .unwrap_or_default();
+    s.catalog = Library::open_default()
+        .and_then(|l| l.catalog())
+        .unwrap_or_default();
+    s.rides = organise::rides(&s.clips, &s.catalog.ride_names);
+    let still_there = match &s.view {
+        View::Ride(id) => s.rides.iter().any(|r| &r.id == id),
+        View::Collection(id) => s.catalog.collections.iter().any(|c| c.id == *id),
+        View::Tag(t) => s.catalog.tags.values().any(|tags| tags.contains(t)),
+        _ => true,
+    };
+    if !still_there {
+        s.view = View::All;
+    }
     let Some(path) = path else { return };
     match timer_core::TimerDatabase::load(&path) {
         Ok(db) => {
@@ -1625,8 +1760,33 @@ fn runs_by_clip(db: &timer_core::TimerDatabase) -> HashMap<String, RunInfo> {
 
 /// Whether `clip` shows in `view`.
 fn shows(s: &State, view: &View, clip: &Clip) -> bool {
-    if *view == View::Drafts {
-        return s.drafted.contains_key(&clip.path);
+    let key = || organise::key(clip);
+    match view {
+        View::Drafts => return s.drafted.contains_key(&clip.path),
+        View::Picks => return s.catalog.flags.get(&key()) == Some(&Flag::Pick),
+        View::Rejected => return s.catalog.flags.get(&key()) == Some(&Flag::Reject),
+        View::Ride(id) => {
+            return s
+                .rides
+                .iter()
+                .find(|r| &r.id == id)
+                .is_some_and(|r| r.clips.contains(&key()));
+        }
+        View::Collection(id) => {
+            return s
+                .catalog
+                .collections
+                .iter()
+                .find(|c| c.id == *id)
+                .is_some_and(|c| c.clips.contains(&key()));
+        }
+        View::Tag(t) => {
+            return s
+                .catalog
+                .tags_of(&key())
+                .is_some_and(|tags| tags.contains(t));
+        }
+        _ => {}
     }
     let local = s.roots.on_nas(&clip.path) && clip.local.is_some();
     shown_in(
@@ -1646,8 +1806,14 @@ fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool, local: bool) -> bool
         View::Untimed => run.is_none(),
         View::NotOnNas => !safe,
         View::Local => local,
-        View::Drafts => false,
         View::Course(id) => run.is_some_and(|r| &r.course_id == id),
+        // Decided by the catalog, in `shows`.
+        View::Drafts
+        | View::Picks
+        | View::Rejected
+        | View::Ride(_)
+        | View::Collection(_)
+        | View::Tag(_) => false,
     }
 }
 
@@ -1816,6 +1982,7 @@ fn ticked_runs(s: &State) -> Vec<String> {
 fn fill_courses(p: &Page) {
     let s = p.state.borrow();
     let count = |view: &View| s.clips.iter().filter(|c| shows(&s, view, c)).count();
+    // Key, title, count; a key of "" is a section heading.
     let mut rows: Vec<(String, String, usize)> = vec![
         ("all".into(), "All clips".into(), s.clips.len()),
         (
@@ -1834,35 +2001,77 @@ fn fill_courses(p: &Page) {
             "Drafts to check".into(),
             count(&View::Drafts),
         ),
+        ("picks".into(), "Picks".into(), count(&View::Picks)),
+        ("rejected".into(), "Rejected".into(), count(&View::Rejected)),
     ];
-    for (id, name) in &s.courses {
-        rows.push((
-            format!("course:{id}"),
-            name.clone(),
-            count(&View::Course(id.clone())),
-        ));
-    }
-    let selected = match &s.view {
-        View::All => "all".to_owned(),
-        View::Untimed => "untimed".to_owned(),
-        View::NotOnNas => "nas".to_owned(),
-        View::Local => "local".to_owned(),
-        View::Drafts => "drafts".to_owned(),
-        View::Course(id) => format!("course:{id}"),
-    };
+    let section =
+        |rows: &mut Vec<(String, String, usize)>, title: &str, items: Vec<(View, String)>| {
+            if items.is_empty() {
+                return;
+            }
+            rows.push((String::new(), title.to_owned(), 0));
+            for (view, name) in items {
+                let n = count(&view);
+                rows.push((view_key(&view), name, n));
+            }
+        };
+    section(
+        &mut rows,
+        "Collections",
+        s.catalog
+            .collections
+            .iter()
+            .map(|c| (View::Collection(c.id), c.name.clone()))
+            .collect(),
+    );
+    section(
+        &mut rows,
+        "Tags",
+        s.catalog
+            .all_tags()
+            .into_iter()
+            .map(|(t, _)| (View::Tag(t.clone()), t))
+            .collect(),
+    );
+    section(
+        &mut rows,
+        "Courses",
+        s.courses
+            .iter()
+            .map(|(id, name)| (View::Course(id.clone()), name.clone()))
+            .collect(),
+    );
+    section(
+        &mut rows,
+        "Rides",
+        s.rides
+            .iter()
+            .map(|r| (View::Ride(r.id.clone()), r.title()))
+            .collect(),
+    );
+    let selected = view_key(&s.view);
     drop(s);
     p.filling.set(true);
     while let Some(row) = p.course_list.first_child() {
         p.course_list.remove(&row);
     }
     for (key, name, n) in rows {
+        let row = gtk::ListBoxRow::new();
+        if key.is_empty() {
+            let heading = label(&name, "heading");
+            heading.set_margin_top(10);
+            row.set_child(Some(&heading));
+            row.set_selectable(false);
+            row.set_activatable(false);
+            p.course_list.append(&row);
+            continue;
+        }
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let title = label(&name, "");
         title.set_hexpand(true);
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
         line.append(&title);
         line.append(&label(&n.to_string(), "dim-label"));
-        let row = gtk::ListBoxRow::new();
         row.set_child(Some(&line));
         row.set_widget_name(&key);
         row.set_tooltip_text(Some(&name));
@@ -1874,6 +2083,243 @@ fn fill_courses(p: &Page) {
         }
     }
     p.filling.set(false);
+}
+
+/// The panel row's name for a view.
+fn view_key(view: &View) -> String {
+    match view {
+        View::All => "all".to_owned(),
+        View::Untimed => "untimed".to_owned(),
+        View::NotOnNas => "nas".to_owned(),
+        View::Local => "local".to_owned(),
+        View::Drafts => "drafts".to_owned(),
+        View::Picks => "picks".to_owned(),
+        View::Rejected => "rejected".to_owned(),
+        View::Course(id) => format!("course:{id}"),
+        View::Ride(id) => format!("ride:{id}"),
+        View::Collection(id) => format!("collection:{id}"),
+        View::Tag(t) => format!("tag:{t}"),
+    }
+}
+
+/// The view for a course, ride, collection or tag row (else All clips).
+fn view_named(key: &str) -> View {
+    let Some((kind, rest)) = key.split_once(':') else {
+        return View::All;
+    };
+    match kind {
+        "course" => View::Course(rest.to_owned()),
+        "ride" => View::Ride(rest.to_owned()),
+        "collection" => rest.parse().map_or(View::All, View::Collection),
+        "tag" => View::Tag(rest.to_owned()),
+        _ => View::All,
+    }
+}
+
+/// The Organise menu's item `item` (in the order built) on the ticked clips.
+fn organise_ticked(p: &Page, item: usize) {
+    let s = p.state.borrow();
+    let ticked: Vec<&Clip> = s
+        .clips
+        .iter()
+        .filter(|c| s.selected.contains(&c.path))
+        .collect();
+    let keys: Vec<String> = ticked.iter().map(|c| organise::key(c)).collect();
+    let tags: Vec<crate::organise_ui::TagState> = s
+        .catalog
+        .all_tags()
+        .into_iter()
+        .map(|(tag, _)| {
+            let having = keys
+                .iter()
+                .filter(|k| s.catalog.tags_of(k).is_some_and(|t| t.contains(&tag)))
+                .count();
+            crate::organise_ui::TagState {
+                tag,
+                all: having == keys.len(),
+                some: having > 0,
+            }
+        })
+        .collect();
+    let collections: Vec<String> = s
+        .catalog
+        .collections
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    let view = s.view.clone();
+    drop(s);
+    if keys.is_empty() {
+        return;
+    }
+    let n = keys.len();
+    let what = format!("{n} {}", plural(n, "clip", "clips"));
+    let apply = {
+        let p = p.clone();
+        move |result: anyhow::Result<String>| {
+            match result {
+                Ok(text) => p.status.set_text(&text),
+                Err(e) => p.status.set_text(&format!("Not saved: {e:#}")),
+            }
+            load_runs(&p);
+            fill_courses(&p);
+            refill(&p);
+        }
+    };
+    match item {
+        0..=2 => {
+            let (flag, text) = match item {
+                0 => (Some(Flag::Pick), format!("Picked {what}.")),
+                1 => (Some(Flag::Reject), format!("Rejected {what}.")),
+                _ => (None, format!("Cleared the flag on {what}.")),
+            };
+            apply(
+                Library::open_default()
+                    .and_then(|l| l.set_flag(&keys, flag))
+                    .map(|()| text),
+            );
+        }
+        3 => crate::organise_ui::tags_dialog(&p.shared, n, tags, move |add, remove| {
+            let result = Library::open_default().and_then(|l| {
+                for t in &add {
+                    l.add_tag(&keys, t)?;
+                }
+                for t in &remove {
+                    l.remove_tag(&keys, t)?;
+                }
+                Ok(format!("Tags saved for {what}."))
+            });
+            apply(result);
+        }),
+        4 => crate::organise_ui::collection_dialog(&p.shared, collections, move |name| {
+            let result = Library::open_default().and_then(|l| {
+                let id = l.collection(&name)?;
+                l.add_to_collection(id, &keys)?;
+                Ok(format!("Added {what} to {name}."))
+            });
+            apply(result);
+        }),
+        _ => {
+            if let View::Collection(id) = view {
+                apply(
+                    Library::open_default()
+                        .and_then(|l| l.remove_from_collection(id, &keys))
+                        .map(|()| format!("Took {what} out of the collection.")),
+                );
+            }
+        }
+    }
+}
+
+/// Renames the course, ride or collection shown.
+fn rename_selected(p: &Page) {
+    let s = p.state.borrow();
+    let view = s.view.clone();
+    match view {
+        View::Course(id) => {
+            let Some((id, name)) = s.courses.iter().find(|(c, _)| *c == id).cloned() else {
+                return;
+            };
+            drop(s);
+            let p2 = p.clone();
+            crate::courses::rename_course(&p.shared, &id, &name, move |result| {
+                p2.status.set_text(&result.unwrap_or_else(|e| e));
+            });
+        }
+        View::Ride(id) => {
+            let Some(ride) = s.rides.iter().find(|r| r.id == id).cloned() else {
+                return;
+            };
+            drop(s);
+            let p2 = p.clone();
+            crate::organise_ui::name_dialog(
+                &p.shared,
+                "Name this ride",
+                &format!(
+                    "{} clips from {}. Leave it empty to go back to the date. Only the catalog changes: no files move.",
+                    ride.clips.len(),
+                    ride.start.format("%a %-d %b %Y, %H:%M")
+                ),
+                &ride.name.clone().unwrap_or_default(),
+                None,
+                move |name| {
+                    let result = Library::open_default().and_then(|l| l.name_ride(&ride, &name));
+                    if let Err(e) = result {
+                        p2.status.set_text(&format!("Not saved: {e:#}"));
+                    }
+                    load_runs(&p2);
+                    fill_courses(&p2);
+                    refill(&p2);
+                },
+            );
+        }
+        View::Collection(id) => {
+            let Some(name) = s
+                .catalog
+                .collections
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.name.clone())
+            else {
+                return;
+            };
+            drop(s);
+            let (p2, p3) = (p.clone(), p.clone());
+            crate::organise_ui::name_dialog(
+                &p.shared,
+                "Rename collection",
+                "Delete takes the collection away; its clips stay in the Library.",
+                &name,
+                Some(Box::new(move || {
+                    if let Err(e) = Library::open_default().and_then(|l| l.delete_collection(id)) {
+                        p3.status.set_text(&format!("Not deleted: {e:#}"));
+                    }
+                    load_runs(&p3);
+                    fill_courses(&p3);
+                    refill(&p3);
+                })),
+                move |name| {
+                    if let Err(e) =
+                        Library::open_default().and_then(|l| l.rename_collection(id, &name))
+                    {
+                        p2.status.set_text(&format!("Not renamed: {e:#}"));
+                    }
+                    load_runs(&p2);
+                    fill_courses(&p2);
+                    refill(&p2);
+                },
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Makes thumbnails on a thread of its own, the most recently asked first
+/// (the rows on screen now), and sends each back as [`Reply::Thumb`].
+fn thumbs_worker(replies: mpsc::Sender<Reply>) -> mpsc::Sender<(PathBuf, PathBuf)> {
+    let (tx, rx) = mpsc::channel::<(PathBuf, PathBuf)>();
+    std::thread::spawn(move || {
+        let cache = library::thumbs::cache_dir();
+        let mut wanted: Vec<(PathBuf, PathBuf)> = Vec::new();
+        loop {
+            if wanted.is_empty() {
+                match rx.recv() {
+                    Ok(job) => wanted.push(job),
+                    Err(_) => return,
+                }
+            }
+            wanted.extend(rx.try_iter());
+            let Some((clip, source)) = wanted.pop() else {
+                continue;
+            };
+            if let Ok(png) = library::thumbs::thumbnail(&source, &cache)
+                && replies.send(Reply::Thumb(clip, png)).is_err()
+            {
+                return;
+            }
+        }
+    });
+    tx
 }
 
 /// Moves the ticked clips' runs to another course.

@@ -4,6 +4,7 @@ mod courses;
 mod desktop;
 mod import_page;
 mod library_page;
+mod organise_ui;
 mod output_page;
 mod resolve;
 mod resolve_menu;

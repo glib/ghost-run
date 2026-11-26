@@ -11,6 +11,7 @@
 //! - [`footage`]: the NAS footage root and local editing copies.
 //! - [`hydrate`]: local copies of NAS clips, made and removed.
 //! - [`preview`]: the catalog's small preview and audio of NAS clips.
+//! - [`organise`]: rides, tags, flags and collections.
 //! - [`overlays`]: where rendered overlays go.
 //! - [`backup`]: whether each clip's original is verified on the NAS.
 //! - [`catalog_backup`]: a daily copy of the catalog and run database on the NAS.
@@ -23,6 +24,7 @@ pub mod catalog_backup;
 pub mod footage;
 pub mod frames;
 pub mod hydrate;
+pub mod organise;
 pub mod overlays;
 pub mod preview;
 pub mod probe;

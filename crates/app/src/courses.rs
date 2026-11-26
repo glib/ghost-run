@@ -178,7 +178,7 @@ pub fn move_runs(
     );
 }
 
-fn ask(
+pub(crate) fn ask(
     shared: &Shared,
     heading: &str,
     body: &str,
