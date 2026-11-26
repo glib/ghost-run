@@ -22,6 +22,20 @@ pub struct Roots {
 }
 
 impl Roots {
+    /// The roots from Import's settings: the archive folder on the NAS (online
+    /// if mounted as set up) and the editing folder.
+    pub fn from_import(import: &ingest::settings::Settings) -> Self {
+        Roots {
+            nas_online: import
+                .archive
+                .as_ref()
+                .is_some_and(|a| ingest::storage::Root::destination(a).is_ok()),
+            nas: import.archive.as_ref().map(|a| a.path.clone()),
+            local: import.editing.as_ref().map(|e| e.path.clone()),
+            catalog: crate::preview::dir(),
+        }
+    }
+
     /// Whether `path` is an original on the NAS.
     pub fn on_nas(&self, path: &Path) -> bool {
         self.nas.as_ref().is_some_and(|root| path.starts_with(root))

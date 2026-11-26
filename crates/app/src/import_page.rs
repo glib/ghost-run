@@ -31,15 +31,33 @@ use ingest::model::{Batch, Cancel, Candidate, Event, Item, Stage};
 use ingest::settings::{self, Settings, Workflow};
 use ingest::{catalog, discovery, pipeline};
 
+use library::Clip;
+use library::footage::Roots;
+use library::hydrate::Settled;
+
 use crate::shared::{Change, Shared};
 
 enum Command {
     /// List a card or folder's clips, and which are on the NAS already.
     Scan(PathBuf),
-    /// Plan and run an import of these candidates (selection set).
-    Import(Box<Settings>, Vec<Candidate>),
+    /// Plan and run an import of these candidates (selection set), keeping
+    /// the local copies of the clips in the set (relative paths).
+    Import(Box<Settings>, Vec<Candidate>, HashSet<PathBuf>),
     /// Run a stopped or failed batch again.
-    Retry(String),
+    Retry(String, HashSet<PathBuf>),
+}
+
+/// What happened to the local copies after an import ([`settle_batch`]).
+#[derive(Default)]
+struct Settle {
+    kept: usize,
+    removed: usize,
+    freed: u64,
+    /// Clip name and why, for the ones whose preview or proxy failed, or
+    /// whose copy couldn't be removed.
+    failed: Vec<(String, String)>,
+    /// Originals verified on the NAS by the batch, for the Library.
+    originals: Vec<PathBuf>,
 }
 
 enum Reply {
@@ -52,7 +70,14 @@ enum Reply {
     },
     Thumb(usize, PathBuf, PathBuf),
     Started(Box<Batch>),
-    Finished(Box<Batch>),
+    /// After the copies: clip `done` of `total`, its step and how far.
+    Settling {
+        done: usize,
+        total: usize,
+        step: String,
+        fraction: f64,
+    },
+    Finished(Box<Batch>, Box<Settle>),
     Error(String),
 }
 
@@ -80,6 +105,10 @@ struct State {
     candidates: Vec<Candidate>,
     imported: HashMap<PathBuf, PathBuf>,
     ticked: HashSet<PathBuf>,
+    /// Clips whose local copy stays after the import, to edit now.
+    keep: HashSet<PathBuf>,
+    /// Keep every ticked clip's local copy.
+    keep_all: bool,
     thumbs: HashMap<PathBuf, PathBuf>,
     batch: Option<Batch>,
     progress: HashMap<usize, Progress>,
@@ -90,6 +119,18 @@ struct State {
     pictures: HashMap<PathBuf, gtk::Picture>,
     statuses: HashMap<PathBuf, gtk::Label>,
     checks: HashMap<PathBuf, gtk::CheckButton>,
+    keeps: HashMap<PathBuf, gtk::ToggleButton>,
+}
+
+impl State {
+    /// The ticked clips whose local copies are kept.
+    fn kept(&self) -> HashSet<PathBuf> {
+        self.ticked
+            .iter()
+            .filter(|r| self.keep_all || self.keep.contains(*r))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -115,6 +156,7 @@ struct Page {
     progress: gtk::ProgressBar,
     import: gtk::Button,
     stop: gtk::Button,
+    keep_all: gtk::CheckButton,
 }
 
 /// The page: this view, with the old Import window opening over it.
@@ -227,10 +269,16 @@ fn view(shared: &Shared, open_advanced: impl Fn() + 'static) -> gtk::Widget {
     let summary = label("", "");
     summary.set_wrap(true);
     summary.set_hexpand(true);
+    let keep_all = gtk::CheckButton::with_label("Keep all here to edit now");
+    keep_all.set_tooltip_text(Some(
+        "Local copies are removed once the originals are verified on the NAS, \
+         unless kept. Kept clips get a proxy too.",
+    ));
     let stop = gtk::Button::with_label("Stop");
     let import = gtk::Button::with_label("Import");
     import.add_css_class("suggested-action");
     footer_row.append(&summary);
+    footer_row.append(&keep_all);
     footer_row.append(&stop);
     footer_row.append(&import);
     footer.append(&footer_row);
@@ -269,6 +317,7 @@ fn view(shared: &Shared, open_advanced: impl Fn() + 'static) -> gtk::Widget {
         progress,
         import,
         stop,
+        keep_all,
     };
 
     let s = shared.clone();
@@ -286,11 +335,20 @@ fn view(shared: &Shared, open_advanced: impl Fn() + 'static) -> gtk::Widget {
             .set_text("Stopping after the files being worked on now…");
     });
     let p = page.clone();
+    page.keep_all.connect_toggled(move |b| {
+        p.state.borrow_mut().keep_all = b.is_active();
+        sync_keeps(&p);
+        refresh(&p);
+    });
+    let p = page.clone();
     page.retry.connect_clicked(move |_| {
-        let id = p.state.borrow().batch.as_ref().map(|b| b.id.clone());
+        let s = p.state.borrow();
+        let id = s.batch.as_ref().map(|b| b.id.clone());
+        let keep = s.kept();
+        drop(s);
         if let Some(id) = id {
             begin(&p, Busy::Importing);
-            let _ = p.tx.send(Command::Retry(id));
+            let _ = p.tx.send(Command::Retry(id, keep));
         }
     });
     let p = page.clone();
@@ -371,20 +429,26 @@ fn worker(
                             imported,
                         })
                     }
-                    Command::Import(settings, candidates) => {
+                    Command::Import(settings, candidates, keep) => {
                         let mut batch = pipeline::plan(*settings, candidates, &cancel).await?;
                         let mut jobs = Jobs::open(&settings::data_dir())?;
                         jobs.save(&batch)?;
                         let _ = replies.send(Reply::Started(Box::new(batch.clone())));
                         pipeline::run(&mut jobs, &mut batch, None, &cancel, &events).await?;
-                        Ok(Reply::Finished(Box::new(batch)))
+                        drop(jobs);
+                        let roots = Roots::from_import(&batch.settings);
+                        let settled = settle_batch(&batch, &roots, &keep, &cancel, &replies);
+                        Ok(Reply::Finished(Box::new(batch), Box::new(settled)))
                     }
-                    Command::Retry(id) => {
+                    Command::Retry(id, keep) => {
                         let mut jobs = Jobs::open(&settings::data_dir())?;
                         let mut batch = jobs.load(&id)?;
                         let _ = replies.send(Reply::Started(Box::new(batch.clone())));
                         pipeline::run(&mut jobs, &mut batch, None, &cancel, &events).await?;
-                        Ok(Reply::Finished(Box::new(batch)))
+                        drop(jobs);
+                        let roots = Roots::from_import(&batch.settings);
+                        let settled = settle_batch(&batch, &roots, &keep, &cancel, &replies);
+                        Ok(Reply::Finished(Box::new(batch), Box::new(settled)))
                     }
                 }
             });
@@ -506,8 +570,84 @@ fn item_status(item: &Item, progress: Option<&Progress>) -> (String, &'static st
     }
 }
 
+/// The Library's clip for an item whose original is verified on the NAS and
+/// whose local copy was made and verified: `None` for anything else.
+fn imported_clip(item: &Item, roots: &Roots) -> Option<Clip> {
+    if !(item.source.editing
+        && item.error.is_none()
+        && item.archive == Stage::Verified
+        && item.editing == Stage::Verified)
+    {
+        return None;
+    }
+    let path = roots.nas.as_ref()?.join(&item.archive_path);
+    let local = roots.local_copy(&path).filter(|l| l.is_file())?;
+    let info = library::probe::probe(&local).ok()?;
+    Some(Clip {
+        path,
+        size: item.source.identity.size,
+        info: Some(info),
+        local: Some(local),
+        ..Clip::default()
+    })
+}
+
+/// After the copies (decision 0005): each new clip's preview is made from its
+/// local copy, then the copy is kept (with a proxy) if asked, else removed,
+/// now that its original is verified on the NAS. Failures are noted and
+/// leave the copy in place; nothing here fails the import.
+fn settle_batch(
+    batch: &Batch,
+    roots: &Roots,
+    keep: &HashSet<PathBuf>,
+    cancel: &Cancel,
+    replies: &mpsc::Sender<Reply>,
+) -> Settle {
+    let mut out = Settle {
+        originals: batch
+            .items
+            .iter()
+            .filter(|i| i.source.editing && i.archive == Stage::Verified)
+            .filter_map(|i| Some(batch.settings.archive.as_ref()?.path.join(&i.archive_path)))
+            .collect(),
+        ..Settle::default()
+    };
+    let clips: Vec<(Clip, bool)> = batch
+        .items
+        .iter()
+        .filter_map(|i| Some((imported_clip(i, roots)?, keep.contains(&i.source.relative))))
+        .collect();
+    let total = clips.len();
+    for (done, (clip, kept)) in clips.into_iter().enumerate() {
+        if cancel.0.load(Ordering::SeqCst) {
+            break;
+        }
+        let mut last = Instant::now();
+        let result = library::hydrate::settle(&clip, roots, kept, &cancel.0, |step, fraction| {
+            if last.elapsed() > Duration::from_millis(200) {
+                last = Instant::now();
+                let _ = replies.send(Reply::Settling {
+                    done,
+                    total,
+                    step: step.to_owned(),
+                    fraction,
+                });
+            }
+        });
+        match result {
+            Ok(Settled::Kept) => out.kept += 1,
+            Ok(Settled::Removed(bytes)) => {
+                out.removed += 1;
+                out.freed += bytes;
+            }
+            Err(e) => out.failed.push((clip.name(), format!("{e:#}"))),
+        }
+    }
+    out
+}
+
 /// What happened, in a sentence or two.
-fn result_text(b: &Batch) -> (String, &'static str) {
+fn result_text(b: &Batch, settled: &Settle) -> (String, &'static str) {
     let videos: Vec<&Item> = b.items.iter().filter(|i| i.source.editing).collect();
     let done = videos.iter().filter(|i| i.complete()).count();
     let failed: Vec<&&Item> = videos.iter().filter(|i| i.error.is_some()).collect();
@@ -528,6 +668,35 @@ fn result_text(b: &Batch) -> (String, &'static str) {
             " {} failed: {}",
             failed.len(),
             first_line(first.error.as_deref().unwrap_or_default())
+        ));
+    }
+    match (settled.kept, settled.removed) {
+        (0, 0) => {}
+        (0, n) => text.push_str(&format!(
+            " Previews made; {n} local {} removed ({}).",
+            if n == 1 { "copy" } else { "copies" },
+            human_bytes(settled.freed)
+        )),
+        (k, 0) => text.push_str(&format!(
+            " Previews made; {k} local {} kept here to edit.",
+            if k == 1 { "copy" } else { "copies" }
+        )),
+        (k, n) => text.push_str(&format!(
+            " Previews made; {k} local {} kept here to edit, {n} removed ({}).",
+            if k == 1 { "copy" } else { "copies" },
+            human_bytes(settled.freed)
+        )),
+    }
+    if let Some((name, why)) = settled.failed.first() {
+        text.push_str(&format!(
+            " {} local {} left in place: {name}: {}",
+            settled.failed.len(),
+            if settled.failed.len() == 1 {
+                "copy was"
+            } else {
+                "copies were"
+            },
+            first_line(why)
         ));
     }
     if b.safe_to_wipe() {
@@ -638,6 +807,7 @@ fn start_import(p: &Page) {
         return;
     };
     let candidates = selection(&s.candidates, &s.ticked);
+    let keep = s.kept();
     drop(s);
     if !candidates.iter().any(|c| c.selected) {
         return;
@@ -654,7 +824,8 @@ fn start_import(p: &Page) {
     }
     begin(p, Busy::Importing);
     p.summary.set_text("Checking the NAS and free space…");
-    let _ = p.tx.send(Command::Import(Box::new(settings), candidates));
+    let _ =
+        p.tx.send(Command::Import(Box::new(settings), candidates, keep));
 }
 
 fn handle(p: &Page, reply: Reply) {
@@ -704,8 +875,30 @@ fn handle(p: &Page, reply: Reply) {
             p.state.borrow_mut().batch = Some(*batch);
             update_progress(p);
         }
-        Reply::Finished(batch) => {
-            let result = result_text(&batch);
+        Reply::Settling {
+            done,
+            total,
+            step,
+            fraction,
+        } => {
+            p.summary.set_text(&format!(
+                "Making {} · clip {} of {total}",
+                if step == "proxy" {
+                    "a proxy"
+                } else {
+                    "previews"
+                },
+                done + 1
+            ));
+            p.progress.set_visible(true);
+            p.progress
+                .set_fraction((done as f64 + fraction) / total.max(1) as f64);
+        }
+        Reply::Finished(batch, settled) => {
+            let result = result_text(&batch, &settled);
+            if !settled.originals.is_empty() {
+                p.shared.imported(settled.originals.clone());
+            }
             let mut s = p.state.borrow_mut();
             s.busy = Busy::No;
             s.progress.clear();
@@ -726,6 +919,8 @@ fn handle(p: &Page, reply: Reply) {
                     .iter()
                     .any(|i| &i.source.relative == r && i.complete())
             });
+            let ticked = s.ticked.clone();
+            s.keep.retain(|r| ticked.contains(r));
             s.result = Some(result);
             s.batch = Some(*batch);
             drop(s);
@@ -837,6 +1032,7 @@ fn fill(p: &Page) {
     s.pictures.clear();
     s.statuses.clear();
     s.checks.clear();
+    s.keeps.clear();
     let source = s.source.clone().unwrap_or_default();
     let days: Vec<(chrono::NaiveDate, Vec<Candidate>)> = by_day(&s.candidates)
         .into_iter()
@@ -933,6 +1129,16 @@ fn clip_row(p: &Page, s: &mut State, source: &Path, c: &Candidate) -> gtk::ListB
         None => set_status(&status, "New", ""),
     }
     line.append(&status);
+    let keep = gtk::ToggleButton::with_label("Keep here");
+    keep.add_css_class("flat");
+    keep.set_valign(gtk::Align::Center);
+    keep.set_tooltip_text(Some(
+        "Keep this clip's local copy after the import, with a proxy, to edit now",
+    ));
+    keep.update_property(&[gtk::accessible::Property::Label(&format!(
+        "Keep {name} here to edit"
+    ))]);
+    line.append(&keep);
     let row = gtk::ListBoxRow::new();
     row.set_activatable(false);
     row.set_child(Some(&line));
@@ -951,8 +1157,47 @@ fn clip_row(p: &Page, s: &mut State, source: &Path, c: &Candidate) -> gtk::ListB
     });
     s.pictures.insert(c.relative.clone(), picture);
     s.statuses.insert(c.relative.clone(), status);
+    let relative = c.relative.clone();
+    let page = p.clone();
+    keep.connect_toggled(move |keep| {
+        let mut s = page.state.borrow_mut();
+        if s.keep_all {
+            return;
+        }
+        if keep.is_active() {
+            s.keep.insert(relative.clone());
+        } else {
+            s.keep.remove(&relative);
+        }
+        drop(s);
+        refresh(&page);
+    });
     s.checks.insert(c.relative.clone(), check);
+    s.keeps.insert(c.relative.clone(), keep);
     row
+}
+
+/// Shows each row's "Keep here" as the state has it: only for clips being
+/// imported, and all on while "Keep all" is.
+fn sync_keeps(p: &Page) {
+    let s = p.state.borrow();
+    let idle = s.busy == Busy::No;
+    let kept = s.kept();
+    let toggles: Vec<(gtk::ToggleButton, bool, bool)> = s
+        .keeps
+        .iter()
+        .map(|(r, b)| {
+            let ticked = s.ticked.contains(r) && !s.imported.contains_key(r);
+            (b.clone(), ticked, kept.contains(r))
+        })
+        .collect();
+    let keep_all = s.keep_all;
+    drop(s);
+    for (b, ticked, on) in toggles {
+        b.set_visible(ticked);
+        b.set_active(on);
+        b.set_sensitive(idle && !keep_all);
+    }
 }
 
 fn set_status(label: &gtk::Label, text: &str, class: &str) {
@@ -970,7 +1215,8 @@ fn refresh(p: &Page) {
     let settings = Settings::load().unwrap_or_default();
     let configured = settings.archive.is_some() && settings.editing.is_some();
     p.where_label.set_markup(&format!(
-        "Originals go to <b>{}</b> · editing copies to <b>{}</b>",
+        "Originals go to <b>{}</b> · local copies to <b>{}</b>, removed once \
+         the originals are verified unless kept here",
         glib::markup_escape_text(
             &settings
                 .archive
@@ -1066,6 +1312,8 @@ fn refresh(p: &Page) {
         check.set_sensitive(idle && !s.imported.contains_key(relative));
     }
     p.stop.set_visible(!idle);
+    p.keep_all.set_visible(listing && !ticked.is_empty());
+    p.keep_all.set_sensitive(idle);
     p.progress.set_visible(s.busy == Busy::Importing);
     p.import
         .set_sensitive(idle && configured && !ticked.is_empty());
@@ -1084,14 +1332,22 @@ fn refresh(p: &Page) {
         } else if total == 0 {
             "No clips on this card.".to_owned()
         } else {
+            let kept = s.kept().len();
             format!(
-                "{total} {} · {on_nas} already on the NAS · {} ticked ({})",
+                "{total} {} · {on_nas} already on the NAS · {} ticked ({}){}",
                 if total == 1 { "clip" } else { "clips" },
                 ticked.len(),
-                human_bytes(bytes)
+                human_bytes(bytes),
+                if kept > 0 && !s.keep_all {
+                    format!(" · {kept} kept here")
+                } else {
+                    String::new()
+                }
             )
         });
     }
+    drop(s);
+    sync_keeps(p);
 }
 
 fn label(text: &str, class: &str) -> gtk::Label {
@@ -1107,6 +1363,92 @@ fn label(text: &str, class: &str) -> gtk::Label {
 mod tests {
     use super::*;
     use ingest::model::Identity;
+    use ingest::settings::Destination;
+
+    /// A whole import as the page runs it: originals verified on the "NAS",
+    /// previews made from the local copies, the kept clip's copy and proxy
+    /// left, the other's removed.
+    #[test]
+    fn an_import_makes_previews_and_keeps_only_the_local_copies_asked_for() {
+        let d = tempfile::tempdir().unwrap();
+        let source = d.path().join("card/DCIM/100MEDIA");
+        for folder in [&source, &d.path().join("nas"), &d.path().join("edit")] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        for name in [
+            "DJI_20261124093012_0001_D.MP4",
+            "DJI_20261124094500_0002_D.MP4",
+        ] {
+            let ok = std::process::Command::new("ffmpeg")
+                .args(["-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("testsrc2=size=320x180:rate=30:duration=1")
+                .args(["-f", "lavfi", "-i", "sine=duration=1"])
+                .args(["-c:v", "libx264", "-c:a", "aac", "-shortest"])
+                .arg(source.join(name))
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        }
+        let card = d.path().join("card");
+        let settings = Settings {
+            source: card.clone(),
+            archive: Some(Destination::select(d.path().join("nas"), false).unwrap()),
+            editing: Some(Destination::select(d.path().join("edit"), false).unwrap()),
+            workflow: Workflow::Ingest,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let cancel = Cancel::default();
+        let batch = rt.block_on(async {
+            let candidates = discovery::scan(&card, &cancel).await.unwrap();
+            let mut batch = pipeline::plan(settings, candidates, &cancel).await.unwrap();
+            let mut jobs = Jobs::open(&d.path().join("jobs")).unwrap();
+            let (tx, rx) = mpsc::sync_channel(64);
+            std::thread::spawn(move || while rx.recv().is_ok() {});
+            pipeline::run(&mut jobs, &mut batch, None, &cancel, &tx)
+                .await
+                .unwrap();
+            batch
+        });
+        assert!(batch.safe_to_wipe(), "{}", batch.summary());
+        let roots = Roots {
+            catalog: d.path().join("catalog"),
+            ..Roots::from_import(&batch.settings)
+        };
+        assert!(roots.nas_online);
+        let kept_rel = PathBuf::from("DCIM/100MEDIA/DJI_20261124093012_0001_D.MP4");
+        let (replies, _rx) = mpsc::channel();
+        let settled = settle_batch(
+            &batch,
+            &roots,
+            &[kept_rel.clone()].into(),
+            &cancel,
+            &replies,
+        );
+        assert_eq!(
+            (settled.kept, settled.removed),
+            (1, 1),
+            "{:?}",
+            settled.failed
+        );
+        assert!(settled.freed > 0);
+        assert_eq!(settled.originals.len(), 2);
+        for item in &batch.items {
+            let original = d.path().join("nas").join(&item.archive_path);
+            assert!(original.is_file());
+            let size = item.source.identity.size;
+            assert!(library::preview::preview_path(&roots.catalog, &original, size).is_file());
+            let local = roots.local_copy(&original).unwrap();
+            let kept = item.source.relative == kept_rel;
+            assert_eq!(local.is_file(), kept, "{}", local.display());
+            assert_eq!(library::proxy::proxy_path(&local).is_file(), kept);
+        }
+        let (text, _) = result_text(&batch, &settled);
+        assert!(
+            text.contains("1 local copy kept here to edit, 1 removed"),
+            "{text}"
+        );
+    }
 
     fn candidate(relative: &str, editing: bool, sidecar_for: Option<&str>) -> Candidate {
         Candidate {
