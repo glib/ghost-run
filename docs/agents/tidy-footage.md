@@ -39,7 +39,7 @@ verified on the NAS.
 - **The share.** The footage root sits inside Liam's Resolve folder on the
   Synology share. Call that folder the **share folder**, and confirm it with
   Liam. If `archive.path` isn't set, ask Liam where the footage root should
-  be. The default is `<share folder>/Footage`.
+  be. The default is `<share folder>/footage`.
 - **Check the mount.** Use `findmnt -T <path>`: the footage root must be on a
   CIFS/SMB mount. Stop and say so if the share isn't mounted, rather than
   writing into an empty local folder.
@@ -110,16 +110,16 @@ Walk the share folder (skipping the above) and classify every file. Use
   Ghost Run's `*.overlay.mov` and `Overlays/`. Move them to `_regenerable/`.
 - **Exports**: finished videos (H.264/H.265, usually longer, names that aren't
   camera names, often in an output folder).
-  - Each goes to `<share folder>/Exports/YYYY-MM-DD Title.ext`, with the date
+  - Each goes to `<share folder>/exports/YYYY-MM-DD Title.ext`, with the date
     from the name, else `creation_time`, else the modification time.
   - The title is from the file name, made readable. Keep the old name in the
     log.
 - **Brand**: logos, intro/outro animations, stingers, music, sound effects,
   fonts, LUTs, title templates, `.drfx`/`.setting` Fusion files and images.
-  They go to `<share folder>/Brand/` in subfolders by kind.
+  They go to `<share folder>/brand/` in subfolders by kind.
 - **Projects**: `.drp`, `.dra` and Resolve project backups go to
-  `<share folder>/Projects/`.
-- **Anything else** goes to `<share folder>/Other/`, keeping its folder. If
+  `<share folder>/projects/`.
+- **Anything else** goes to `<share folder>/other/`, keeping its folder. If
   you're unsure what something is, it goes to `<share folder>/_review/` with
   the reason in the plan.
 
