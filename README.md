@@ -63,9 +63,14 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   end of its overlay on V1, the overlay above it on V2, and the clip's proxy
   linked, at the first clip's frame rate and size. (A project template can be
   chosen in Settings for later; it isn't used yet.)
-- **Import**: verified card archive + editing copies, filed by recording day
-  under the camera's own names, and a clear **Safe to wipe the card** once
-  every selected original is verified (formerly
+- **Import**: put the camera card in and it's listed straight away (every
+  time, whatever path it mounts at), clips grouped by day with thumbnails,
+  and clips already on the NAS marked and left out. **Import** copies each
+  original to the NAS, checks it byte for byte, makes an editing copy, files
+  both by recording day under the camera's own names, and ends with a clear
+  **you can wipe the card** (or why not). Where they go is set in Settings →
+  Import. **History and recovery** has earlier imports, retries, cleanup,
+  reports and converting files already on disk (formerly
   [resolve-ingest](docs/ingest/import.md)).
 
 The rest is being built

@@ -1,4 +1,5 @@
-//! The app's settings: footage folders, the run database, the Resolve template.
+//! The app's settings: footage folders, the run database, the Resolve
+//! template, and where imports go.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -97,6 +98,26 @@ pub fn open(shared: &Shared) {
         |s| s.overlay_folder.clone(),
         |s, v| s.overlay_folder = v,
         ("Folder", &[]),
+    ));
+    let import = adw::PreferencesGroup::new();
+    import.set_title("Import");
+    import.set_description(Some(
+        "Where the Import page puts a card's clips: each original, checked byte for byte, and a copy to edit.",
+    ));
+    page.add(&import);
+    import.add(&import_row(
+        shared,
+        &mut subscriptions,
+        "Originals",
+        "A folder on your NAS share (an SMB/CIFS mount). The only copy once the card is wiped.",
+        true,
+    ));
+    import.add(&import_row(
+        shared,
+        &mut subscriptions,
+        "Editing copies",
+        "A local folder: copies Resolve edits smoothly, kept in the same folders as the originals.",
+        false,
     ));
     let resolve = adw::PreferencesGroup::new();
     resolve.set_title("DaVinci Resolve");
@@ -248,6 +269,61 @@ fn file_row(
     let shared2 = shared.clone();
     clear.connect_clicked(move |_| {
         let _ = shared2.update(|s| set(s, None));
+    });
+    row
+}
+
+/// A row holding one of the Import page's destinations (`ingest` settings):
+/// originals (`nas`: must be on a network share) or editing copies.
+fn import_row(
+    shared: &Shared,
+    subscriptions: &mut Vec<usize>,
+    title: &str,
+    help: &str,
+    nas: bool,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().title(title).build();
+    let show = {
+        let (row, help) = (row.clone(), help.to_owned());
+        move || {
+            let settings = ingest::settings::Settings::load().unwrap_or_default();
+            let place = if nas {
+                settings.archive
+            } else {
+                settings.editing
+            };
+            row.set_subtitle(&match place {
+                Some(d) => format!("{}\n{help}", d.path.display()),
+                None => format!("Not set\n{help}"),
+            });
+        }
+    };
+    show();
+    subscriptions.push(shared.subscribe(move |_| show()));
+    let choose = gtk::Button::with_label("Choose…");
+    choose.set_valign(gtk::Align::Center);
+    row.add_suffix(&choose);
+    let (shared2, title, row2) = (shared.clone(), title.to_owned(), row.clone());
+    choose.connect_clicked(move |_| {
+        let dialog = gtk::FileDialog::builder().title(&title).build();
+        let (shared3, row3) = (shared2.clone(), row2.clone());
+        dialog.select_folder(Some(&shared2.window), gio::Cancellable::NONE, move |r| {
+            let Ok(file) = r else { return };
+            let Some(path) = file.path() else { return };
+            let saved = ingest::settings::Destination::select(path, nas).and_then(|d| {
+                let mut settings = ingest::settings::Settings::load()?;
+                if nas {
+                    settings.archive = Some(d);
+                } else {
+                    settings.editing = Some(d);
+                }
+                settings.save()
+            });
+            match saved {
+                Ok(()) => shared3.notify(crate::shared::Change::Settings),
+                Err(e) => row3.set_subtitle(&format!("Not changed: {e:#}")),
+            }
+        });
     });
     row
 }

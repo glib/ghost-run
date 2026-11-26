@@ -485,5 +485,7 @@ async fn verified_originals_can_be_listed_while_the_journal_is_open() {
             .join(format!("2026/2026-08-26/{name}"))
     );
     assert_eq!(archived[0].editing, None);
+    assert_eq!(archived[0].source_relative, Path::new(name));
+    assert_eq!(archived[0].source_size, 12);
     assert!(b.safe_to_wipe());
 }

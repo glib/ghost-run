@@ -83,11 +83,24 @@ pub async fn scan_with_progress(
             sidecar_for: None,
         });
     }
+    let is_lrf = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lrf"));
     let videos: Vec<_> = items
         .iter()
-        .filter(|i| i.editing)
+        .filter(|i| i.editing && !is_lrf(&i.relative))
         .map(|i| i.relative.clone())
         .collect();
+    // DJI's low-resolution .LRF beside a clip is its preview, not footage:
+    // archive it with the clip, but make no editing copy of it.
+    for i in &mut items {
+        if is_lrf(&i.relative)
+            && let Some(video) = videos.iter().find(|v| {
+                v.parent() == i.relative.parent() && v.file_stem() == i.relative.file_stem()
+            })
+        {
+            i.editing = false;
+            i.sidecar_for = Some(video.clone());
+        }
+    }
     for i in &mut items {
         let ext = i
             .relative

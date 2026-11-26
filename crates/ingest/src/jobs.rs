@@ -180,6 +180,12 @@ pub struct Archived {
     pub editing: Option<std::path::PathBuf>,
     /// When the archive copy was last checked against the source.
     pub verified_at: String,
+    /// The source file, as it was when imported: its path under the
+    /// source folder (the card), size and modification time. A card put back
+    /// in shows the same, so its files can be recognised as imported.
+    pub source_relative: std::path::PathBuf,
+    pub source_size: u64,
+    pub source_mtime: i64,
 }
 
 /// Every verified original in the journal in `dir`, read without taking the
@@ -223,6 +229,9 @@ pub fn archived(dir: &Path) -> Result<Vec<Archived>> {
                 original: archive.path.join(&item.archive_path),
                 editing,
                 verified_at: evidence.checked_at.clone(),
+                source_relative: item.source.relative.clone(),
+                source_size: item.source.identity.size,
+                source_mtime: item.source.identity.mtime,
             });
         }
     }

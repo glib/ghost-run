@@ -18,6 +18,8 @@ pub enum Change {
     Render,
     /// Runs were picked to go into Resolve ([`Shared::send_to_resolve`]).
     Resolve,
+    /// Show the Library page (after an import).
+    ShowLibrary,
 }
 
 /// Where runs sent to Resolve go.

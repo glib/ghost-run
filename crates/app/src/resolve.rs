@@ -182,7 +182,7 @@ fn write_script() -> Result<PathBuf> {
     Ok(path)
 }
 
-fn which(program: &str) -> Option<PathBuf> {
+pub fn which(program: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)
             .map(|p| p.join(program))

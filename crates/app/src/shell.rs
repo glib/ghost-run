@@ -3,7 +3,8 @@
 use adw::prelude::*;
 
 /// Wraps the pages in a split view with a sidebar. `import` is the Import
-/// page (the old resolve-ingest window, with its own header bar).
+/// page's advanced view (the old resolve-ingest window, with its own header
+/// bar), opened over the new Import page.
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
     let pages: [(&str, &str, &str, gtk::Widget); 4] = [
@@ -25,7 +26,12 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
             "document-export-symbolic",
             crate::output_page::page(&shared),
         ),
-        ("import", "Import", "document-save-symbolic", import),
+        (
+            "import",
+            "Import",
+            "document-save-symbolic",
+            crate::import_page::page(&shared, import),
+        ),
     ];
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
@@ -76,7 +82,7 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     // A clip picked to be timed opens over the Library (library_page).
     let list2 = list.clone();
     shared.subscribe(move |change| match change {
-        crate::shared::Change::TimeClip => {
+        crate::shared::Change::TimeClip | crate::shared::Change::ShowLibrary => {
             select(&list2, "library");
         }
         crate::shared::Change::Render | crate::shared::Change::Resolve => {

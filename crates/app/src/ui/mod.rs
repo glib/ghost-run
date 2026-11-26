@@ -116,14 +116,10 @@ pub fn run(demo: bool) {
 fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, events: Events, cancel: Cancel) {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let mut jobs = match Jobs::open(&settings::data_dir()) {
-            Ok(j) => j,
-            Err(e) => {
-                let _ = tx.send(Reply::Error(format!("{e:#}")));
-                return;
-            }
-        };
-        if let Ok(h) = jobs.history() {
+        // The journal allows one user at a time, and the Import page uses it
+        // too: open it for each command, not for the app's lifetime.
+        let open = || Jobs::open(&settings::data_dir());
+        if let Ok(h) = open().and_then(|jobs| jobs.history()) {
             let interrupted: Vec<_> = h.into_iter().filter(|b| b.status != "Completed").collect();
             if !interrupted.is_empty() {
                 let _ = tx.send(Reply::History(interrupted));
@@ -132,7 +128,7 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, events: Events, 
         while let Ok(command) = rx.recv() {
             let result: anyhow::Result<Reply> = rt.block_on(async {
                 Ok(match command {
-                    Command::PrepareArchivedEditing(id, index) => { let mut batch = jobs.load(&id)?; pipeline::prepare_archived_editing(&mut jobs, &mut batch, index, &cancel, &events).await?; Reply::Finished(Box::new(batch)) }
+                    Command::PrepareArchivedEditing(id, index) => { let mut jobs = open()?; let mut batch = jobs.load(&id)?; pipeline::prepare_archived_editing(&mut jobs, &mut batch, index, &cancel, &events).await?; Reply::Finished(Box::new(batch)) }
                     Command::Scan(s) => {
                         let converting = s.workflow == Workflow::Convert;
                         let mut c = discovery::scan_with_progress(&s.source, &cancel, converting, |count, path| {
@@ -142,20 +138,24 @@ fn worker(rx: mpsc::Receiver<Command>, tx: mpsc::Sender<Reply>, events: Events, 
                         Reply::Scan(c)
                     },
                     Command::Plan(mut s, c, alongside) => { if s.workflow == Workflow::Convert && alongside { s.editing = Some(Destination::select(s.source.clone(), false)?); } Reply::Plan(Box::new(pipeline::plan(s, c, &cancel).await?)) },
-                    Command::Start(mut b) => { jobs.save(&b)?; pipeline::run(&mut jobs, &mut b, None, &cancel, &events).await?; Reply::Finished(b) }
-                    Command::Retry(id, only) => { let mut b = jobs.load(&id)?; pipeline::run(&mut jobs, &mut b, only, &cancel, &events).await?; Reply::Finished(Box::new(b)) }
-                    Command::Select(which, path, mut s) => {
+                    Command::Start(mut b) => { let mut jobs = open()?; jobs.save(&b)?; pipeline::run(&mut jobs, &mut b, None, &cancel, &events).await?; Reply::Finished(b) }
+                    Command::Retry(id, only) => { let mut jobs = open()?; let mut b = jobs.load(&id)?; pipeline::run(&mut jobs, &mut b, only, &cancel, &events).await?; Reply::Finished(Box::new(b)) }
+                    Command::Select(which, path, s) => {
+                        // Settings may have changed elsewhere (the Import page, Settings).
+                        let mut s = Settings::load().unwrap_or(s);
                         match which { 0 => s.source = std::fs::canonicalize(path)?, 1 => s.archive = Some(Destination::select(path, true)?), _ => s.editing = Some(Destination::select(path, false)?) }
                         s.save()?; Reply::Settings(s)
                     }
-                    Command::History => Reply::History(jobs.history()?),
-                    Command::Export(id, path) => { ingest::diagnostics::export(&jobs.load(&id)?, &path)?; Reply::Info(format!("Report saved to {}", path.display())) }
+                    Command::History => Reply::History(open()?.history()?),
+                    Command::Export(id, path) => { ingest::diagnostics::export(&open()?.load(&id)?, &path)?; Reply::Info(format!("Report saved to {}", path.display())) }
                     Command::Cleanup(id, remove) => {
+                        let jobs = open()?;
                         let batch = jobs.load(&id)?;
                         if remove { Reply::Info(format!("Removed {} of owned partial files.", human_bytes(pipeline::cleanup(&jobs, &batch)?))) }
                         else { let partials = pipeline::stale_partials(&batch)?; Reply::Info(format!("{} owned partials, {}. Use Remove owned partials in History to clean up. Verified files are retained.", partials.len(), human_bytes(partials.iter().map(|p| p.2).sum()))) }
                     }
                     Command::Probe(i, s, mut c) => {
+                        let jobs = open()?;
                         let file = ingest::storage::Root::source(&s.source)?.read(&c.relative)?;
                         c.probe = Some(media::probe(&file, Some(jobs.lock_fd()), &cancel).await?); c.probe_error = None;
                         c.editing = c.probe.as_ref().is_some_and(|p| p.video().is_some()); Reply::Probe(i, c)
@@ -384,12 +384,9 @@ fn build(app: &adw::Application, demo: bool) {
                 batch.settings.editing.as_ref().map(|d| &d.path)
             };
             if let Some(path) = path {
-                let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
                 let v2 = v.clone();
-                launcher.launch(Some(&v.window), gio::Cancellable::NONE, move |r| {
-                    if let Err(e) = r {
-                        v2.banner.set_text(&format!("Cannot open folder: {e}"));
-                    }
+                crate::desktop::open_folder(&v.window, path, move |e| {
+                    v2.banner.set_text(&format!("Cannot open folder: {e}"));
                 });
             }
         });

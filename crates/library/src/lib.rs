@@ -24,6 +24,7 @@ pub mod proxy;
 pub mod scan;
 pub mod settings;
 pub mod store;
+pub mod thumbs;
 
 pub use probe::MediaInfo;
 pub use store::{Clip, Draft, Library, ProxyState, Rendered};
