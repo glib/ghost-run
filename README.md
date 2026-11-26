@@ -8,8 +8,10 @@ It is becoming one Linux desktop app, **Ghost Run**: import footage, place
 Start/S1…/Finish markers (automatically, from a reference run), compare runs per
 track, render overlays and hand them to DaVinci Resolve. Today the app has:
 
-- **Library**: every clip in your footage folders (Folders… to add them), when
-  it was recorded, and which stored run it is (settings are under the gear in
+- **Library**: every clip in your footage folders (Folders… to add them) and
+  Import's editing folder, when it was recorded, which stored run it is, and
+  whether its original is verified on the NAS (**Not on the NAS** lists the
+  ones that aren't) (settings are under the gear in
   the sidebar). **Make missing proxies** writes a
   half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
   Resolve picks up as proxy media and the Time page steps through. Double-click
@@ -55,7 +57,9 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   end of its overlay on V1, the overlay above it on V2, and the clip's proxy
   linked, at the first clip's frame rate and size. (A project template can be
   chosen in Settings for later; it isn't used yet.)
-- **Import**: verified card archive + editing copies (formerly
+- **Import**: verified card archive + editing copies, filed by recording day
+  under the camera's own names, and a clear **Safe to wipe the card** once
+  every selected original is verified (formerly
   [resolve-ingest](docs/ingest/import.md)).
 
 The rest is being built

@@ -741,8 +741,7 @@ fn build(app: &adw::Application, demo: bool) {
                     refresh_rows(&v);
                 }
                 Reply::Finished(b) => {
-                    v.banner
-                        .set_text(&format!("{} · {}", b.status, b.summary()));
+                    v.banner.set_text(&finished_text(&b));
                     v.stage.set_text(&b.status);
                     v.progress.set_fraction(b.verified_fraction());
                     let mut s = v.state.borrow_mut();
@@ -1585,4 +1584,26 @@ fn demo_progress(v: &View) {
     v.progress.set_fraction(0.65);
     v.banner.set_text("Archive unavailable. Reconnect the share, then retry. 3 originals are already verified. Prototype only.");
     v.start.set_label("Retry failed");
+}
+
+/// What the banner says when a batch stops: whether the card is safe to wipe.
+fn finished_text(b: &Batch) -> String {
+    let mut text = format!("{} · {}", b.status, b.summary());
+    if b.safe_to_wipe() {
+        text.push_str(
+            " · Safe to wipe the card: every selected original is verified on the archive",
+        );
+        if b.skipped > 0 {
+            text.push_str(&format!(
+                " ({} {} left unselected {} not archived)",
+                b.skipped,
+                if b.skipped == 1 { "file" } else { "files" },
+                if b.skipped == 1 { "was" } else { "were" }
+            ));
+        }
+        text.push('.');
+    } else if b.settings.workflow == ingest::settings::Workflow::Ingest {
+        text.push_str(" · Keep the card: not every original is verified on the archive yet.");
+    }
+    text
 }
