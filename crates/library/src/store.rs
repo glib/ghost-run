@@ -1,6 +1,9 @@
-//! The library database: one row per clip found in the footage folders.
-//! It holds nothing that can't be found again by rescanning, so it can be
-//! deleted at any time (`$XDG_DATA_HOME/ghost-run/library.sqlite3`).
+//! The library database (`$XDG_DATA_HOME/ghost-run/library.sqlite3`): one row
+//! per clip found in the footage folders, which a rescan finds again, and
+//! what only Liam can say about them, which it can't: marker drafts, course
+//! references and targets, and [`crate::organise`]'s tags, flags,
+//! collections and ride names. It's copied to the NAS daily
+//! ([`crate::catalog_backup`]).
 
 use std::path::{Path, PathBuf};
 
@@ -69,12 +72,13 @@ impl Clip {
 }
 
 pub struct Library {
-    db: Connection,
+    pub(crate) db: Connection,
 }
 
 /// 1: clips. 2: marker drafts. 3: course references. 4: rendered overlays.
-/// 5: course target times. 6: clips' local copy and preview.
-const VERSION: u32 = 6;
+/// 5: course target times. 6: clips' local copy and preview. 7: tags, flags,
+/// collections and ride names.
+const VERSION: u32 = 7;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -141,6 +145,7 @@ impl Library {
                  ALTER TABLE clips ADD COLUMN preview TEXT;",
             )?;
         }
+        Self::create_organise_tables(&db)?;
         db.pragma_update(None, "user_version", VERSION)?;
         Ok(Self { db })
     }
