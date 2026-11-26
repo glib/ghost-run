@@ -26,7 +26,9 @@ The two-asset limit bounds active work. Partials retained from failed attempts c
 
 ## Output paths
 
-Each batch gets a UTC date and UUID. Source hierarchy is preserved under `DATE/UUID/originals` and `DATE/UUID/clips`. Components use reversible ASCII escaping: `f-` prefix, lowercase ASCII letters/digits/hyphen/underscore unchanged, every other UTF-8 byte encoded as `~hh`. Uppercase is escaped so case-folding destinations cannot collapse distinct source names. The editing name retains the encoded original extension and appends `.mov`, so `clip.mp4` and `clip.mov` stay separate. The manifest maps original names to planned names. Overlong and non-UTF8 paths fail preflight with an explanation. Files are never silently renamed to an ambiguous destination name.
+Originals go in `<archive>/<YYYY>/<YYYY-MM-DD>/<file name>`, the day by the camera's clock (from the file name, else the date the camera embedded; a file with neither goes by its modification time). Editing copies go at the same path under the editing destination with `.mov` added (`clip.mp4` → `clip.mp4.mov`, so `clip.mp4` and `clip.mov` stay separate). File names stay as the camera wrote them; only characters SMB can't store (`\ : * ? " < > |`, control characters, a trailing space or dot) and `~` itself are written as `~hh`. A name already in that day's folder, compared ignoring case because SMB shares fold case, goes in a numbered folder (`2/`, `3/`…), so importing a card twice never overwrites; a sidecar goes in the same folder as its video. Overlong and non-UTF8 names fail preflight with an explanation. Nothing is renamed.
+
+Batches made before this layout used `DATE/UUID/originals` and `DATE/UUID/clips` with every name escaped (`f-` prefix, uppercase as `~hh`); they are still read, rechecked and retried where they are. The layout is `crates/ingest/src/layout.rs`; why: `docs/decisions/0005-workspaces-and-hydrated-footage.md`.
 
 ## Recovery
 
