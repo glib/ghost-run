@@ -11,7 +11,9 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
 - **Library**: every clip in your footage folders (Folders… to add them) and
   Import's editing folder, when it was recorded, which stored run it is, and
   whether its original is verified on the NAS (**Not on the NAS** lists the
-  ones that aren't) (settings are under the gear in
+  ones that aren't). Once a day it also copies its catalog and the run
+  database to the NAS (`.ghost-run/backups/` in Import's archive folder,
+  the last 30 days kept) (settings are under the gear in
   the sidebar). **Make missing proxies** writes a
   half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
   Resolve picks up as proxy media and the Time page steps through. Double-click

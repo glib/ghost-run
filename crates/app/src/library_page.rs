@@ -27,10 +27,19 @@ use timer_core::timing::format_duration;
 use crate::shared::{Change, Shared};
 
 enum Command {
-    Scan(Vec<PathBuf>),
+    /// Scan these folders, then back the catalog up to the NAS archive (with
+    /// the run database) if there is one.
+    Scan(Vec<PathBuf>, Option<BackupTo>),
     Proxies(Vec<(PathBuf, MediaInfo)>),
     /// Place markers in each clip (path, footage to read) from the best-matching course.
     AutoPlace(Vec<(PathBuf, PathBuf)>, Vec<Reference>),
+}
+
+struct BackupTo {
+    /// Import's archive, checked to be the share it was set up as (an
+    /// unmounted share leaves an empty local folder behind).
+    archive: ingest::settings::Destination,
+    run_database: Option<PathBuf>,
 }
 
 enum Reply {
@@ -573,7 +582,7 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
         for command in commands {
             cancel.store(false, Ordering::Relaxed);
             match command {
-                Command::Scan(folders) => {
+                Command::Scan(folders, backup_to) => {
                     let result = scan::scan(&folders, &library, &cancel, |p| {
                         let text = match p {
                             Progress::Looking(_) => "Looking for footage…".to_owned(),
@@ -589,12 +598,29 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     if let Ok(clips) = library.clips() {
                         let _ = replies.send(Reply::Backups(backups(&clips)));
                     }
+                    let backed_up = backup_to.map(|b| {
+                        ingest::storage::Root::destination(&b.archive).and_then(|_| {
+                            library::catalog_backup::run(
+                                &library,
+                                b.run_database.as_deref(),
+                                &b.archive.path,
+                                chrono::Local::now().date_naive(),
+                            )
+                        })
+                    });
+                    let note = match backed_up {
+                        Some(Ok(r)) if !r.written.is_empty() => {
+                            " Catalog backed up to the NAS.".to_owned()
+                        }
+                        Some(Err(e)) => format!(" Catalog backup to the NAS failed: {e:#}."),
+                        _ => String::new(),
+                    };
                     let _ = replies.send(match result {
                         Ok(r) if cancel.load(Ordering::Relaxed) => {
-                            Reply::Done(format!("Scan stopped after {} clips.", r.probed))
+                            Reply::Done(format!("Scan stopped after {} clips.{note}", r.probed))
                         }
-                        Ok(r) => Reply::Done(scan_summary(&r)),
-                        Err(e) => Reply::Error(format!("Scan failed: {e:#}")),
+                        Ok(r) => Reply::Done(scan_summary(&r) + &note),
+                        Err(e) => Reply::Error(format!("Scan failed: {e:#}.{note}")),
                     });
                 }
                 Command::Proxies(queue) => {
@@ -851,7 +877,14 @@ fn start_scan(p: &Page) {
     }
     p.state.borrow_mut().busy = true;
     refresh_controls(p);
-    let _ = p.tx.send(Command::Scan(folders));
+    let backup_to = ingest::settings::Settings::load()
+        .ok()
+        .and_then(|s| s.archive)
+        .map(|a| BackupTo {
+            archive: a,
+            run_database: p.shared.settings().run_database.clone(),
+        });
+    let _ = p.tx.send(Command::Scan(folders, backup_to));
 }
 
 /// The clips "Make proxies" would work on: the ticked ones, or else every

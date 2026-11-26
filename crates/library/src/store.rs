@@ -177,6 +177,15 @@ impl Library {
         }
         Ok(gone.len())
     }
+
+    /// Writes a consistent copy of the whole library to `path`, which must
+    /// not exist yet (SQLite's `VACUUM INTO`).
+    pub fn copy_to(&self, path: &Path) -> Result<()> {
+        self.db
+            .execute("VACUUM INTO ?1", [path_text(path)])
+            .with_context(|| format!("copying the library to {}", path.display()))?;
+        Ok(())
+    }
 }
 
 /// A run's rendered overlay: where it is and where it lines up with its clip.
