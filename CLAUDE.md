@@ -56,6 +56,7 @@ sensible option and list assumptions in the PR description.
 - `tests/fixtures/` — made-up databases and marker CSVs for the parity check.
 - `src/resolve_timer/` — Python package. Resolve-free core: `timing.py`, `database.py` (YAML, schema v2), `matching.py`, `stats.py`, `markers.py`, `models.py`, `validation.py`, `service.py`, `cli.py`, `summary_card.py`. Resolve-only: `resolve_adapter.py`, `ui.py`, `ui_controller.py`, `runtime_support.py`, and the Fusion part of `overlay.py`.
 - `scripts/` — Resolve launcher and installers (Linux davincibox, Windows).
+- `scripts/edit_check.py` — writes a test edit (labelled clips; FCPXML 1.9 and OTIO) to import into Resolve and see whether dissolves, the fade, V2 alpha clips and timecoded sources survive: step 1 of the first-edit plan (`docs/decisions/0004-first-edit-and-thumbnails.md`). Stdlib only; tested in `tests/test_edit_check.py`.
 - `tests/` — unittest; Resolve is faked, so everything runs without it.
 - `examples/` — example database and markers CSV (made-up runs).
 - `docs/decisions/` — short ADRs for significant choices. Add one when you make one.
