@@ -64,6 +64,8 @@ pub struct Catalog {
     pub collections: Vec<Collection>,
     /// Clip key → the name of the ride it's in (kept on one clip per ride).
     pub ride_names: HashMap<String, String>,
+    /// By name (`crate::features`).
+    pub features: Vec<crate::features::Feature>,
 }
 
 impl Catalog {
@@ -218,6 +220,7 @@ impl Library {
             let (clip, name) = row?;
             c.ride_names.insert(clip, name);
         }
+        c.features = self.features()?;
         Ok(c)
     }
 

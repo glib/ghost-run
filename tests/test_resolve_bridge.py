@@ -444,6 +444,25 @@ class NewProjectTests(unittest.TestCase):
         self.assertEqual([(i.start, i.end, i.left) for i in v2],
                          [(86600, 86900, 0), (87000, 87070, 50)])
 
+    def test_captions_go_on_a_third_track_from_the_clips_start(self):
+        runs = [
+            {"clip": self.file("a.MP4"), "proxy": None, "first_frame": 0, "frames": 600,
+             "caption": self.file("00-caption.mov"), "caption_frames": 120},
+            {"clip": self.file("b.MP4"), "proxy": None, "first_frame": 50, "frames": 60,
+             "caption": self.file("01-caption.mov"), "caption_frames": 120},
+            {"clip": self.file("c.MP4"), "proxy": None, "first_frame": 0, "frames": 10,
+             "caption": "/v/gone-caption.mov"},
+        ]
+        reply = bridge.handle({"command": "new_project", "name": "Drop", "runs": runs},
+                              lambda: self.resolve)
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["notes"], ["c.MP4: its caption file is missing"])
+        v1, v2, v3 = self.resolve.projects["Drop"].timeline.tracks
+        self.assertEqual(v2, [])
+        # Each from its item's start; never longer than the item.
+        self.assertEqual([(i.start, i.end, i.left) for i in v3],
+                         [(86400, 86520, 0), (87000, 87060, 0)])
+
     def test_overlay_spans(self):
         self.assertEqual(bridge.overlay_span(0, 600, 200, 300), (200, 0, 300))
         self.assertEqual(bridge.overlay_span(100, 100, 50, 120), (0, 50, 70))

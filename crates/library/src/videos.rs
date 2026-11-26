@@ -108,6 +108,9 @@ pub struct Item {
     pub timer: Option<String>,
     /// A card instead of a clip (`clip` and `path` empty).
     pub card: Option<Card>,
+    /// Text shown low on the clip the whole time it's on, like "Attempt 3 ·
+    /// Landed" (`crate::kinds`); drawn as an overlay of its own.
+    pub caption: Option<String>,
 }
 
 impl Item {
@@ -120,6 +123,7 @@ impl Item {
             frames: frames(clip),
             timer: None,
             card: None,
+            caption: None,
         }
     }
 
@@ -325,6 +329,7 @@ impl Library {
                frames INTEGER NOT NULL,
                timer TEXT,
                card TEXT,
+               caption TEXT,
                PRIMARY KEY (video, position)
              );
              CREATE TABLE IF NOT EXISTS video_usage (
@@ -341,6 +346,13 @@ impl Library {
             .exists([])?;
         if !has_card {
             db.execute_batch("ALTER TABLE video_items ADD COLUMN card TEXT;")?;
+        }
+        // Schema 9 had no captions.
+        let has_caption: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('video_items') WHERE name = 'caption'")?
+            .exists([])?;
+        if !has_caption {
+            db.execute_batch("ALTER TABLE video_items ADD COLUMN caption TEXT;")?;
         }
         Ok(())
     }
@@ -384,7 +396,7 @@ impl Library {
             return Ok(None);
         };
         let mut stmt = self.db.prepare(
-            "SELECT clip, path, first_frame, frames, timer, card FROM video_items
+            "SELECT clip, path, first_frame, frames, timer, card, caption FROM video_items
              WHERE video = ?1 ORDER BY position",
         )?;
         video.items = stmt
@@ -398,6 +410,7 @@ impl Library {
                     card: r
                         .get::<_, Option<String>>(5)?
                         .and_then(|j| serde_json::from_str(&j).ok()),
+                    caption: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -444,8 +457,8 @@ impl Library {
         for (position, i) in items.iter().enumerate() {
             tx.execute(
                 "INSERT INTO video_items
-                   (video, position, clip, path, first_frame, frames, timer, card)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                   (video, position, clip, path, first_frame, frames, timer, card, caption)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     video,
                     position as i64,
@@ -454,7 +467,8 @@ impl Library {
                     i.first_frame,
                     i.frames,
                     i.timer,
-                    i.card.as_ref().map(serde_json::to_string).transpose()?
+                    i.card.as_ref().map(serde_json::to_string).transpose()?,
+                    i.caption
                 ],
             )?;
         }
@@ -658,6 +672,7 @@ mod tests {
             frames: 300,
             timer: timer.map(Into::into),
             card: None,
+            caption: None,
         }
     }
 
@@ -668,7 +683,11 @@ mod tests {
         assert!(lib.new_video("  ", "clips").is_err());
         let a = lib.new_video("Whistler top to bottom", "clips").unwrap();
         let b = lib.new_video("A-Line progression", "speed").unwrap();
-        lib.set_items(a, &[item("x.mp4.1", Some("r1")), item("y.mp4.2", None)])
+        let captioned = Item {
+            caption: Some("Attempt 2".into()),
+            ..item("y.mp4.2", None)
+        };
+        lib.set_items(a, &[item("x.mp4.1", Some("r1")), captioned])
             .unwrap();
         assert_eq!(
             lib.add_items(a, &[item("y.mp4.2", None), item("z.mp4.3", None)])
@@ -681,6 +700,7 @@ mod tests {
             ["x.mp4.1", "y.mp4.2", "z.mp4.3"]
         );
         assert_eq!(v.items[0].timer.as_deref(), Some("r1"));
+        assert_eq!(v.items[1].caption.as_deref(), Some("Attempt 2"));
         v.status = Status::Published;
         v.link = Some("https://youtu.be/abc".into());
         v.published = Some("2026-11-27".into());

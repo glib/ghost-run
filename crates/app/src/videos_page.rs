@@ -472,7 +472,23 @@ fn show(p: &Page) {
         let run = clip.and_then(|c| s.runs.get(&crate::library_page::run_key(&c.path)));
         if item.card.is_none() {
             row.set_title(&glib_escape(&name));
-            row.set_subtitle(&glib_escape(&item_text(item, clip, run)));
+            let mut subtitle = item_text(item, clip, run);
+            if let Some(c) = &item.caption {
+                subtitle.push_str(&format!(" · “{c}”"));
+            }
+            row.set_subtitle(&glib_escape(&subtitle));
+            let caption = gtk::Button::from_icon_name("insert-text-symbolic");
+            caption.add_css_class("flat");
+            caption.set_valign(gtk::Align::Center);
+            caption.set_tooltip_text(Some(
+                "A caption over the start of this clip, like \"Attempt 3 · Landed\"",
+            ));
+            caption.update_property(&[gtk::accessible::Property::Label(&format!(
+                "Caption on {name}"
+            ))]);
+            let (pp, current) = (p.clone(), item.caption.clone().unwrap_or_default());
+            caption.connect_clicked(move |_| edit_caption(&pp, index, &current));
+            row.add_suffix(&caption);
         }
         if let Some(run) = run {
             let timer = gtk::Switch::new();
@@ -893,8 +909,41 @@ fn edit_card(p: &Page, index: usize, card: library::videos::Card) {
     );
 }
 
-/// New video: clips picked in the Library, or a kind made from a run or a
-/// course (`library::kinds`).
+/// Ids and what the new-video dialog calls them.
+type Choices = Vec<(String, String)>;
+
+/// Asks for a clip's caption (empty for none), and saves it.
+fn edit_caption(p: &Page, index: usize, current: &str) {
+    let entry = gtk::Entry::builder()
+        .text(current)
+        .placeholder_text("e.g. Attempt 3 · Landed (empty for none)")
+        .activates_default(true)
+        .build();
+    entry.update_property(&[gtk::accessible::Property::Label("Caption")]);
+    let (pp, entry2) = (p.clone(), entry.clone());
+    crate::courses::ask(
+        &p.shared,
+        "Caption",
+        &format!(
+            "Shown low over the first {} seconds of the clip.",
+            crate::cards::CAPTION_SECONDS
+        ),
+        "Save",
+        Some(entry.upcast_ref()),
+        Some(entry.upcast_ref()),
+        move || {
+            let text = entry2.text().trim().to_owned();
+            save_items(&pp, |items| {
+                if let Some(item) = items.get_mut(index) {
+                    item.caption = (!text.is_empty()).then_some(text);
+                }
+            });
+        },
+    );
+}
+
+/// New video: clips picked in the Library, or a kind made from a run, a
+/// course, a tag, a collection, a ride or a feature (`library::kinds`).
 fn new_video_dialog(p: &Page) {
     let settings = p.shared.settings().clone();
     let (kinds, errors) = library::kinds::all(settings.kinds_folder.as_deref());
@@ -947,6 +996,90 @@ fn new_video_dialog(p: &Page) {
             })
         })
         .collect();
+    let (clips, catalog) = Library::open_default()
+        .and_then(|l| Ok((l.clips()?, l.catalog()?)))
+        .unwrap_or_default();
+    let counted = |n: usize| format!("{n} {}", if n == 1 { "clip" } else { "clips" });
+    let tag_choices: Vec<(String, String)> = catalog
+        .all_tags()
+        .into_iter()
+        .map(|(t, n)| (t.clone(), format!("{t} ({})", counted(n))))
+        .collect();
+    let collection_choices: Vec<(String, String)> = catalog
+        .collections
+        .iter()
+        .map(|c| {
+            (
+                c.id.to_string(),
+                format!("{} ({})", c.name, counted(c.clips.len())),
+            )
+        })
+        .collect();
+    let ride_choices: Vec<(String, String)> = library::organise::rides(&clips, &catalog.ride_names)
+        .into_iter()
+        .map(|r| {
+            (
+                r.id.clone(),
+                format!("{} ({})", r.title(), counted(r.clips.len())),
+            )
+        })
+        .collect();
+    let feature_choices: Vec<(String, String)> = catalog
+        .features
+        .iter()
+        .map(|f| {
+            let n = f.attempts.len();
+            (
+                f.id.to_string(),
+                format!(
+                    "{} ({n} {})",
+                    f.name,
+                    if n == 1 { "attempt" } else { "attempts" }
+                ),
+            )
+        })
+        .collect();
+    use library::kinds::Input;
+    // Each input's choices, the dropdown for them, and what to say when
+    // there are none.
+    let inputs: Vec<(Input, Choices, &str, &str)> = vec![
+        (
+            Input::Run,
+            run_choices,
+            "Run",
+            "No stored runs yet: time one first.",
+        ),
+        (
+            Input::Course,
+            course_choices,
+            "Course",
+            "No course has stored runs yet.",
+        ),
+        (
+            Input::Tag,
+            tag_choices,
+            "Tag",
+            "No clips are tagged yet (Library → Organise → Tags…).",
+        ),
+        (
+            Input::Collection,
+            collection_choices,
+            "Collection",
+            "No collections yet (Library → Organise → Add to collection…).",
+        ),
+        (
+            Input::Ride,
+            ride_choices,
+            "Ride",
+            "No rides in the Library yet.",
+        ),
+        (
+            Input::Feature,
+            feature_choices,
+            "Feature",
+            "No features yet (Library → Organise → Feature attempt…).",
+        ),
+    ];
 
     let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
     let mut names = vec!["Clips you pick in the Library"];
@@ -958,15 +1091,19 @@ fn new_video_dialog(p: &Page) {
     about.set_wrap(true);
     about.set_max_width_chars(40);
     form.append(&about);
-    let strings = |c: &[(String, String)]| {
-        gtk::DropDown::from_strings(&c.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>())
-    };
-    let run = strings(&run_choices);
-    run.update_property(&[gtk::accessible::Property::Label("Run")]);
-    form.append(&run);
-    let course = strings(&course_choices);
-    course.update_property(&[gtk::accessible::Property::Label("Course")]);
-    form.append(&course);
+    let pickers: Rc<Vec<(Input, Choices, gtk::DropDown, String)>> = Rc::new(
+        inputs
+            .into_iter()
+            .map(|(input, choices, name, none)| {
+                let pick = gtk::DropDown::from_strings(
+                    &choices.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(),
+                );
+                pick.update_property(&[gtk::accessible::Property::Label(name)]);
+                form.append(&pick);
+                (input, choices, pick, none.to_owned())
+            })
+            .collect(),
+    );
     let title = gtk::Entry::builder().activates_default(true).build();
     title.update_property(&[gtk::accessible::Property::Label("Title")]);
     form.append(&title);
@@ -977,29 +1114,23 @@ fn new_video_dialog(p: &Page) {
     }
     let kinds = Rc::new(kinds);
     let show_kind = {
-        let (kinds, about, run, course, title) = (
-            kinds.clone(),
-            about.clone(),
-            run.clone(),
-            course.clone(),
-            title.clone(),
-        );
-        let (no_runs, no_courses) = (run_choices.is_empty(), course_choices.is_empty());
+        let (kinds, about, pickers, title) =
+            (kinds.clone(), about.clone(), pickers.clone(), title.clone());
         move |picked: u32| {
             let k = (picked as usize).checked_sub(1).and_then(|i| kinds.get(i));
             let input = k.map(|k| k.input);
             about.set_text(&match k {
                 None => "Name it, then tick its clips in the Library and choose Organise → Add to video….".to_owned(),
-                Some(k) if input == Some(library::kinds::Input::Run) && no_runs => {
-                    format!("{} No stored runs yet: time one first.", k.description)
-                }
-                Some(k) if input == Some(library::kinds::Input::Course) && no_courses => {
-                    format!("{} No course has stored runs yet.", k.description)
-                }
-                Some(k) => k.description.clone(),
+                Some(k) => match pickers.iter().find(|(i, ..)| Some(*i) == input) {
+                    Some((_, choices, _, none)) if choices.is_empty() => {
+                        format!("{} {none}", k.description)
+                    }
+                    _ => k.description.clone(),
+                },
             });
-            run.set_visible(input == Some(library::kinds::Input::Run));
-            course.set_visible(input == Some(library::kinds::Input::Course));
+            for (i, _, pick, _) in pickers.iter() {
+                pick.set_visible(Some(*i) == input);
+            }
             title.set_placeholder_text(Some(if k.is_some() {
                 "Title (leave empty for the kind's)"
             } else {
@@ -1010,7 +1141,7 @@ fn new_video_dialog(p: &Page) {
     show_kind(0);
     kind.connect_selected_notify(move |d| show_kind(d.selected()));
     let pp = p.clone();
-    let (kind2, run2, course2, title2) = (kind.clone(), run.clone(), course.clone(), title.clone());
+    let (kind2, title2) = (kind.clone(), title.clone());
     crate::courses::ask(
         &p.shared,
         "New video",
@@ -1028,15 +1159,21 @@ fn new_video_dialog(p: &Page) {
                 let Some(k) = picked else {
                     return library.new_video(&typed, "clips");
                 };
-                let input = match k.input {
-                    library::kinds::Input::Run => run_choices.get(run2.selected() as usize),
-                    library::kinds::Input::Course => {
-                        course_choices.get(course2.selected() as usize)
-                    }
-                }
-                .map(|(id, _)| id.clone())
-                .context("there's nothing to make it from yet")?;
-                let plan = library::kinds::plan(k, &input, &db, &library.clips()?)?;
+                let input = pickers
+                    .iter()
+                    .find(|(i, ..)| *i == k.input)
+                    .and_then(|(_, choices, pick, _)| choices.get(pick.selected() as usize))
+                    .map(|(id, _)| id.clone())
+                    .context("there's nothing to make it from yet")?;
+                let plan = library::kinds::plan(
+                    k,
+                    &input,
+                    library::kinds::Sources {
+                        db: &db,
+                        clips: &library.clips()?,
+                        catalog: &library.catalog()?,
+                    },
+                )?;
                 let id = library.new_video(
                     if typed.is_empty() {
                         &plan.title

@@ -1,15 +1,16 @@
 # A video kind (decision 0005): what it's made from and the order of its
 # sections. Ghost Run carries these neutral examples; a folder of your own
-# (Settings → Videos → Kinds folder) can replace them by id or add more.
+# (Settings → Video kinds folder) can replace them by id or add more.
 #
-# Text can use: {course}, {date}, {lap}, {best}, {first_date},
+# Run and course kinds' text can use: {course}, {date}, {lap}, {best}, {first_date},
 # {latest_date}, {runs} (how many runs it shows), {faster} (first lap less
 # the best).
 
 id = "trail"
 name = "Trail, no talking"
 description = "One run, start to finish: a title, the whole clip, an end card."
-# One run ("run"), or the runs on one course ("course").
+# One run ("run"), the runs on one course ("course"), or catalogued clips:
+# a "tag", "collection", "ride" or "feature" (see gear-review.toml).
 input = "run"
 title = "{course}"
 

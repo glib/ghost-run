@@ -1,0 +1,25 @@
+# A video kind (decision 0005); see trail.toml for what can go in one.
+
+id = "ridelog"
+name = "Ridelog"
+description = "A whole ride, talking and riding in the order filmed. Cut the talking down on the Videos page or in Resolve."
+# A ride: clips recorded close together (the Library's Rides).
+input = "ride"
+title = "{ride}"
+
+[[section]]
+type = "title"
+text = "{ride}"
+subtitle = "{date}"
+seconds = 3
+
+[[section]]
+# The input's clips in the order recorded, rejects left out.
+type = "clips"
+# For the clips that are stored runs.
+timer = "optional"
+
+[[section]]
+type = "end"
+text = "Thanks for riding along"
+seconds = 3

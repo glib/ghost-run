@@ -113,6 +113,8 @@ enum View {
     Ride(String),
     Collection(i64),
     Tag(String),
+    /// A feature's attempts, by its id (`library::features`).
+    Feature(i64),
 }
 
 struct State {
@@ -309,6 +311,10 @@ fn library_view(shared: &Shared) -> gtk::Widget {
                 "Add to video…",
                 "Put the ticked clips in a video, to build in Resolve",
             ),
+            (
+                "Feature attempt…",
+                "Mark the ticked clips as attempts at a feature, landed or crashed",
+            ),
             ("Remove from this collection", ""),
             (
                 "Move runs to course…",
@@ -316,7 +322,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             ),
         ],
     );
-    let move_course = organise_items[7].clone();
+    let move_course = organise_items[8].clone();
     organise.set_tooltip_text(Some("Flag, tag or collect the ticked clips"));
     let untick = gtk::Button::from_icon_name("edit-clear-symbolic");
     untick.add_css_class("flat");
@@ -448,13 +454,13 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         stop: stop.clone(),
         course_list: course_list.clone(),
         rename: rename.clone(),
-        uncollect: organise_items[6].clone(),
+        uncollect: organise_items[7].clone(),
         thumbs_tx: thumbs_worker(replies_for_thumbs),
         pictures: Rc::default(),
         filling: Rc::default(),
     };
     // Move runs to course… (the last) has its own handler.
-    for (i, item) in organise_items[..7].iter().enumerate() {
+    for (i, item) in organise_items[..8].iter().enumerate() {
         let p = page.clone();
         item.connect_clicked(move |_| organise_ticked(&p, i));
     }
@@ -1335,7 +1341,7 @@ fn refresh_controls(p: &Page) {
         .set_text(&ticked_text(s.selected.len(), runs));
     p.rename.set_sensitive(matches!(
         s.view,
-        View::Course(_) | View::Ride(_) | View::Collection(_)
+        View::Course(_) | View::Ride(_) | View::Collection(_) | View::Feature(_)
     ));
     p.uncollect
         .set_visible(matches!(s.view, View::Collection(_)));
@@ -1712,6 +1718,7 @@ fn load_runs(p: &Page) {
         View::Ride(id) => s.rides.iter().any(|r| &r.id == id),
         View::Collection(id) => s.catalog.collections.iter().any(|c| c.id == *id),
         View::Tag(t) => s.catalog.tags.values().any(|tags| tags.contains(t)),
+        View::Feature(id) => s.catalog.features.iter().any(|f| f.id == *id),
         _ => true,
     };
     if !still_there {
@@ -1804,6 +1811,14 @@ fn shows(s: &State, view: &View, clip: &Clip) -> bool {
                 .tags_of(&key())
                 .is_some_and(|tags| tags.contains(t));
         }
+        View::Feature(id) => {
+            return s
+                .catalog
+                .features
+                .iter()
+                .find(|f| f.id == *id)
+                .is_some_and(|f| f.attempt(&key()).is_some());
+        }
         _ => {}
     }
     let local = s.roots.on_nas(&clip.path) && clip.local.is_some();
@@ -1834,6 +1849,7 @@ fn shown_in(view: &View, run: Option<&RunInfo>, safe: bool, local: bool) -> bool
         | View::Released
         | View::Ride(_)
         | View::Collection(_)
+        | View::Feature(_)
         | View::Tag(_) => false,
     }
 }
@@ -2054,6 +2070,15 @@ fn fill_courses(p: &Page) {
     );
     section(
         &mut rows,
+        "Features",
+        s.catalog
+            .features
+            .iter()
+            .map(|f| (View::Feature(f.id), f.name.clone()))
+            .collect(),
+    );
+    section(
+        &mut rows,
         "Tags",
         s.catalog
             .all_tags()
@@ -2130,6 +2155,7 @@ fn view_key(view: &View) -> String {
         View::Ride(id) => format!("ride:{id}"),
         View::Collection(id) => format!("collection:{id}"),
         View::Tag(t) => format!("tag:{t}"),
+        View::Feature(id) => format!("feature:{id}"),
     }
 }
 
@@ -2143,6 +2169,7 @@ fn view_named(key: &str) -> View {
         "ride" => View::Ride(rest.to_owned()),
         "collection" => rest.parse().map_or(View::All, View::Collection),
         "tag" => View::Tag(rest.to_owned()),
+        "feature" => rest.parse().map_or(View::All, View::Feature),
         _ => View::All,
     }
 }
@@ -2231,6 +2258,34 @@ fn organise_ticked(p: &Page, item: usize) {
             apply(result);
         }),
         5 => add_to_video(p, ticked_items(p)),
+        6 => {
+            let features: Vec<String> = p
+                .state
+                .borrow()
+                .catalog
+                .features
+                .iter()
+                .map(|f| f.name.clone())
+                .collect();
+            crate::organise_ui::feature_dialog(&p.shared, n, features, move |pick| {
+                let result = Library::open_default().and_then(|l| match pick {
+                    Some((name, outcome)) => {
+                        let id = l.feature(&name)?;
+                        l.set_attempts(id, &keys, outcome)?;
+                        let how = match outcome.label() {
+                            "" => String::new(),
+                            o => format!(", {}", o.to_lowercase()),
+                        };
+                        Ok(format!("{what}: attempts at {name}{how}."))
+                    }
+                    None => {
+                        l.remove_attempts(&keys)?;
+                        Ok(format!("{what}: not attempts at a feature."))
+                    }
+                });
+                apply(result);
+            })
+        }
         _ => {
             if let View::Collection(id) = view {
                 apply(
@@ -2310,7 +2365,7 @@ fn add_to_video(p: &Page, items: Vec<library::videos::Item>) {
     });
 }
 
-/// Renames the course, ride or collection shown.
+/// Renames the course, ride, collection or feature shown.
 fn rename_selected(p: &Page) {
     let s = p.state.borrow();
     let view = s.view.clone();
@@ -2380,6 +2435,43 @@ fn rename_selected(p: &Page) {
                 move |name| {
                     if let Err(e) =
                         Library::open_default().and_then(|l| l.rename_collection(id, &name))
+                    {
+                        p2.status.set_text(&format!("Not renamed: {e:#}"));
+                    }
+                    load_runs(&p2);
+                    fill_courses(&p2);
+                    refill(&p2);
+                },
+            );
+        }
+        View::Feature(id) => {
+            let Some(name) = s
+                .catalog
+                .features
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| f.name.clone())
+            else {
+                return;
+            };
+            drop(s);
+            let (p2, p3) = (p.clone(), p.clone());
+            crate::organise_ui::name_dialog(
+                &p.shared,
+                "Rename feature",
+                "Delete takes the feature away; its clips stay in the Library.",
+                &name,
+                Some(Box::new(move || {
+                    if let Err(e) = Library::open_default().and_then(|l| l.delete_feature(id)) {
+                        p3.status.set_text(&format!("Not deleted: {e:#}"));
+                    }
+                    load_runs(&p3);
+                    fill_courses(&p3);
+                    refill(&p3);
+                })),
+                move |name| {
+                    if let Err(e) =
+                        Library::open_default().and_then(|l| l.rename_feature(id, &name))
                     {
                         p2.status.set_text(&format!("Not renamed: {e:#}"));
                     }

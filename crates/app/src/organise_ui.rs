@@ -228,6 +228,74 @@ pub fn video_dialog(
     );
 }
 
+/// Asks which feature the ticked clips are attempts at (one of `names`, or a
+/// new one typed in) and how they went. `done` gets the name and outcome, or
+/// none for "not attempts at anything".
+pub fn feature_dialog(
+    shared: &Shared,
+    clips: usize,
+    names: Vec<String>,
+    done: impl Fn(Option<(String, library::features::Outcome)>) + 'static,
+) {
+    use library::features::Outcome;
+    let form = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let mut choices: Vec<&str> = vec!["New feature"];
+    choices.extend(names.iter().map(String::as_str));
+    let pick = gtk::DropDown::from_strings(&choices);
+    pick.update_property(&[gtk::accessible::Property::Label("Feature")]);
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Name, e.g. Ridge road gap")
+        .activates_default(true)
+        .build();
+    entry.update_property(&[gtk::accessible::Property::Label("New feature's name")]);
+    if !names.is_empty() {
+        pick.set_selected(1);
+        entry.set_visible(false);
+        form.append(&pick);
+    }
+    form.append(&entry);
+    let e = entry.clone();
+    pick.connect_selected_notify(move |p| e.set_visible(p.selected() == 0));
+    const OUTCOMES: [(&str, Option<Outcome>); 4] = [
+        ("Not said", Some(Outcome::Unknown)),
+        ("Landed", Some(Outcome::Landed)),
+        ("Crashed", Some(Outcome::Crashed)),
+        ("Not an attempt at anything", None),
+    ];
+    let outcome = gtk::DropDown::from_strings(&OUTCOMES.map(|(t, _)| t));
+    outcome.update_property(&[gtk::accessible::Property::Label("How it went")]);
+    form.append(&outcome);
+    let (pick2, entry2, outcome2) = (pick.clone(), entry.clone(), outcome.clone());
+    crate::courses::ask(
+        shared,
+        "Feature attempt",
+        &format!(
+            "A feature is a spot you keep trying, like a jump or a drop. The {clips} ticked {} attempts at it; a feature progression video shows them in order.",
+            if clips == 1 {
+                "clip becomes one of the"
+            } else {
+                "clips become"
+            }
+        ),
+        "Save",
+        Some(form.upcast_ref()),
+        Some(entry.upcast_ref()),
+        move || {
+            let Some(how) = OUTCOMES[outcome2.selected() as usize].1 else {
+                done(None);
+                return;
+            };
+            let name = match pick2.selected() {
+                0 => entry2.text().trim().to_owned(),
+                i => names[i as usize - 1].clone(),
+            };
+            if !name.is_empty() {
+                done(Some((name, how)));
+            }
+        },
+    );
+}
+
 /// Asks for a new name (an empty one is allowed when `clearable`, meaning
 /// "go back to the default"). With `delete`, a Delete button too.
 pub fn name_dialog(
