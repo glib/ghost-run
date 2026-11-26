@@ -174,7 +174,8 @@ pub fn collection_dialog(shared: &Shared, names: Vec<String>, done: impl Fn(Stri
 }
 
 /// Asks which video to add the ticked clips to: one of `videos` (id,
-/// title: the unpublished ones), or a new one with a title typed in. `done`
+/// title: the unpublished ones, newest first, the first picked), or a new
+/// one with a title typed in. `done`
 /// gets the video's id, or none and the new title.
 pub fn video_dialog(
     shared: &Shared,
@@ -192,7 +193,10 @@ pub fn video_dialog(
         .activates_default(true)
         .build();
     entry.update_property(&[gtk::accessible::Property::Label("New video's title")]);
+    // The newest unfinished video first: usually the one being put together.
     if !videos.is_empty() {
+        pick.set_selected(1);
+        entry.set_visible(false);
         form.append(&pick);
     }
     form.append(&entry);
