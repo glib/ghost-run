@@ -20,6 +20,8 @@ pub struct AppSettings {
     pub overlay_folder: Option<PathBuf>,
     /// What overlays compare each sector with.
     pub comparison: Comparison,
+    /// Overlays show the live gap to the comparison ("the ghost").
+    pub ghost: bool,
     /// The Distrobox DaVinci Resolve is installed in (default `davincibox`).
     pub resolve_container: Option<String>,
     /// Past this many GB of local copies of NAS clips, the Library suggests
@@ -28,6 +30,9 @@ pub struct AppSettings {
     /// A folder of video kinds (`*.toml`, `library::kinds`) replacing or
     /// adding to the built-in ones.
     pub kinds_folder: Option<PathBuf>,
+    /// A brand kit's `brand.toml` (`library::brand`): cards and captions use
+    /// its colours, fonts and logos.
+    pub brand_kit: Option<PathBuf>,
 }
 
 /// The default for [`AppSettings::local_copies_gb`].
@@ -121,9 +126,11 @@ mod tests {
             resolve_template: None,
             overlay_folder: Some("/out".into()),
             comparison: Comparison::Optimal,
+            ghost: true,
             resolve_container: Some("resolve".into()),
             local_copies_gb: Some(80),
             kinds_folder: Some("/home/x/kinds".into()),
+            brand_kit: Some("/home/x/brand/brand.toml".into()),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);

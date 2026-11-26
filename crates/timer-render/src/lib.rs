@@ -1,7 +1,8 @@
 //! Draws the timer overlay into transparent video frames: the panel in the
 //! top-right corner with the live timer, a row per sector and the lap as each
 //! is reached (green faster, red slower than the comparison), and the best and
-//! optimal laps.
+//! optimal laps. With [`Style::ghost`], a row under the live timer shows the
+//! gap to the comparison lap as it happens (`OverlayPayload::ghost_gap`).
 //!
 //! The layout is the Resolve Fusion overlay's (`overlay.py`), in the same
 //! units: positions as fractions of the frame (x of its width, y of its
@@ -19,6 +20,14 @@ use std::collections::HashMap;
 
 use fontdue::{Font, FontSettings, Metrics};
 use timer_core::overlay::{OverlayPayload, delta_color, delta_text, duration};
+
+/// How the overlay looks, beyond its payload.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Style {
+    /// A live row with the gap to the comparison lap ("the ghost"), when
+    /// every sector has one to compare with.
+    pub ghost: bool,
+}
 
 const FONT: &[u8] = include_bytes!("../fonts/JetBrainsMonoNL-Medium.ttf");
 
@@ -43,10 +52,19 @@ const AMBER: [f32; 4] = [1.0, 0.76, 0.18, 1.0];
 const PANEL_FILL: [f32; 4] = [0.04, 0.055, 0.08, 0.52];
 const PANEL_BORDER: [f32; 4] = [0.72, 0.72, 0.72, 0.55];
 
+#[derive(Debug, Clone, PartialEq)]
+enum Text {
+    Fixed(String),
+    /// The live timer, which changes each frame.
+    Live,
+    /// The live gap to the comparison, which changes each frame, colour too.
+    Ghost,
+}
+
 /// One piece of text on the panel, shown from clip frame `from`.
 #[derive(Debug, Clone, PartialEq)]
 struct Label {
-    text: Option<String>, // `None`: the live timer, which changes each frame
+    text: Text,
     x: f32,
     y: f32,
     size: f32,
@@ -68,7 +86,13 @@ pub struct Layout {
 
 impl Layout {
     pub fn new(payload: &OverlayPayload, width: u32, height: u32) -> Self {
+        Self::styled(payload, width, height, Style::default())
+    }
+
+    pub fn styled(payload: &OverlayPayload, width: u32, height: u32, style: Style) -> Self {
         let rows = payload.rows();
+        let ghost = style.ghost && payload.ghost_gap(payload.start_frame).is_some();
+        let lead = 1 + usize::from(ghost);
         let mut summaries = Vec::new();
         if let Some(best) = payload.best_lap_seconds {
             summaries.push(format!("BEST       {:>8}", duration(best)));
@@ -80,7 +104,7 @@ impl Layout {
         let panel_right = 1.0 - PANEL_RIGHT_MARGIN;
         let center_x = panel_right - PANEL_WIDTH / 2.0;
         let top_y = 1.0 - PANEL_TOP_MARGIN - PANEL_PADDING_Y;
-        let total_rows = 1 + rows.len() + summaries.len();
+        let total_rows = lead + rows.len() + summaries.len();
         let bottom_y = top_y - (total_rows - 1) as f32 * ROW_GAP;
         let panel_height = PANEL_MAX_HEIGHT.min(top_y - bottom_y + PANEL_PADDING_Y * 2.0);
         let center_y = (top_y + bottom_y) / 2.0;
@@ -88,22 +112,42 @@ impl Layout {
         let delta_x = center_x + DELTA_OFFSET_X;
 
         let mut labels = vec![Label {
-            text: None,
+            text: Text::Live,
             x: center_x,
             y: top_y,
             size: LIVE_SIZE,
             color: WHITE,
             from: payload.start_frame,
         }];
+        if ghost {
+            // Like a sector's row: the name where the times are, the live gap
+            // where the deltas are.
+            labels.push(Label {
+                text: Text::Fixed(format!("{:<19}", "GHOST")),
+                x: primary_x,
+                y: top_y - ROW_GAP,
+                size: ROW_SIZE,
+                color: WHITE,
+                from: payload.start_frame,
+            });
+            labels.push(Label {
+                text: Text::Ghost,
+                x: delta_x,
+                y: top_y - ROW_GAP,
+                size: ROW_SIZE,
+                color: WHITE,
+                from: payload.start_frame,
+            });
+        }
         for (i, row) in rows.iter().enumerate() {
-            let y = top_y - (i + 1) as f32 * ROW_GAP;
+            let y = top_y - (i + lead) as f32 * ROW_GAP;
             let value = if row.label == "LAP" {
                 format!("LAP        {:>8}", duration(row.duration_seconds))
             } else {
                 format!("{:<11}{:>8}", row.label, duration(row.duration_seconds))
             };
             labels.push(Label {
-                text: Some(value),
+                text: Text::Fixed(value),
                 x: primary_x,
                 y,
                 size: ROW_SIZE,
@@ -111,7 +155,7 @@ impl Layout {
                 from: row.reveal_frame,
             });
             labels.push(Label {
-                text: Some(delta_text(row.delta_seconds)),
+                text: Text::Fixed(delta_text(row.delta_seconds)),
                 x: delta_x,
                 y,
                 size: ROW_SIZE,
@@ -121,9 +165,9 @@ impl Layout {
         }
         for (i, text) in summaries.into_iter().enumerate() {
             labels.push(Label {
-                text: Some(text),
+                text: Text::Fixed(text),
                 x: primary_x,
-                y: top_y - (1 + rows.len() + i) as f32 * ROW_GAP,
+                y: top_y - (lead + rows.len() + i) as f32 * ROW_GAP,
                 size: SUMMARY_SIZE,
                 color: AMBER,
                 from: payload.start_frame,
@@ -167,7 +211,11 @@ pub struct FrameRenderer {
 
 impl FrameRenderer {
     pub fn new(payload: OverlayPayload, width: u32, height: u32) -> Self {
-        let layout = Layout::new(&payload, width, height);
+        Self::styled(payload, width, height, Style::default())
+    }
+
+    pub fn styled(payload: OverlayPayload, width: u32, height: u32, style: Style) -> Self {
+        let layout = Layout::styled(&payload, width, height, style);
         let font = Font::from_bytes(FONT, FontSettings::default()).expect("bundled font loads");
         let background = panel_background(&layout);
         let work = background.clone();
@@ -227,6 +275,8 @@ impl FrameRenderer {
             "LIVE        {}",
             duration(self.payload.elapsed_seconds(frame))
         );
+        let gap = self.payload.ghost_gap(frame);
+        let ghost = delta_text(gap);
         let labels: Vec<Label> = self
             .layout
             .labels
@@ -235,8 +285,17 @@ impl FrameRenderer {
             .cloned()
             .collect();
         for label in &labels {
-            let text = label.text.as_deref().unwrap_or(&live);
-            self.draw_text(text, label);
+            match &label.text {
+                Text::Fixed(text) => self.draw_text(text, label),
+                Text::Live => self.draw_text(&live, label),
+                Text::Ghost => {
+                    let coloured = Label {
+                        color: delta_color(gap),
+                        ..label.clone()
+                    };
+                    self.draw_text(&ghost, &coloured);
+                }
+            }
         }
         for (d, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(&self.work) {
             *d = unpremultiply(*s);
@@ -434,6 +493,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_ghost_row_adds_a_line_and_turns_green_when_ahead() {
+        let ghost = Style { ghost: true };
+        let plain = Layout::new(&payload(), 3840, 2160).panel;
+        let with = Layout::styled(&payload(), 3840, 2160, ghost).panel;
+        assert!((with.3 as f32 - plain.3 as f32 - ROW_GAP * 2160.0).abs() <= 2.0);
+        // Without a comparison for every sector, no ghost row.
+        let mut partial = payload();
+        partial.sector_reference_seconds[1] = None;
+        assert_eq!(
+            Layout::styled(&partial, 3840, 2160, ghost).panel,
+            Layout::new(&partial, 3840, 2160).panel
+        );
+
+        let mut r = FrameRenderer::styled(payload(), 1920, 1080, ghost);
+        let mut frame = r.blank_frame();
+        // Half way through S1 (0.5 s ridden), the ghost is 0.6 s in: ahead.
+        r.render(150, &mut frame);
+        let (x, y, w, _) = r.layout().panel;
+        let row = (y + (ROW_GAP * 1080.0) as u32, (ROW_GAP * 1080.0) as u32);
+        let green = (row.0..row.0 + row.1)
+            .flat_map(|yy| (x..x + w).map(move |xx| (xx, yy)))
+            .filter(|(xx, yy)| {
+                let p = &frame[((yy * 1920 + xx) * 4) as usize..][..4];
+                p[3] > 200 && p[1] > 200 && p[0] < 120
+            })
+            .count();
+        assert!(green > 10, "{green} green pixels in the ghost row");
     }
 
     #[test]
