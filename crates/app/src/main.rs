@@ -4,6 +4,7 @@ mod courses;
 mod library_page;
 mod output_page;
 mod resolve;
+mod resolve_menu;
 mod runs_page;
 mod settings_dialog;
 mod shared;

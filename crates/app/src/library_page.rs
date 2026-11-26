@@ -101,6 +101,10 @@ struct Page {
     time: gtk::Button,
     auto_place: gtk::Button,
     move_course: gtk::Button,
+    ticked_bar: gtk::Box,
+    ticked_label: gtk::Label,
+    render: gtk::Button,
+    to_resolve: gtk::Button,
     stop: gtk::Button,
     course_list: gtk::ListBox,
     rename: gtk::Button,
@@ -183,17 +187,39 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     ));
     toolbar.append(&counts);
     toolbar.append(&filter);
+    toolbar.append(&proxies);
+    content.append(&toolbar);
+
+    // What can be done with the ticked clips, shown while any are ticked.
+    let ticked_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    ticked_bar.add_css_class("locations");
+    let ticked_label = label("", "");
+    ticked_label.set_hexpand(true);
+    ticked_label.set_wrap(true);
     let auto_place = button("Auto-place");
     auto_place.set_tooltip_text(Some(
         "Find each ticked clip's course and place its markers from that course's reference run, as drafts to check and commit",
     ));
-    toolbar.append(&auto_place);
     let move_course = button("Course…");
     move_course.set_tooltip_text(Some("Move the ticked clips' runs to another course"));
-    toolbar.append(&move_course);
-    toolbar.append(&time);
-    toolbar.append(&proxies);
-    content.append(&toolbar);
+    let render = button("Render overlays");
+    let to_resolve = crate::resolve_menu::menu();
+    let untick = gtk::Button::from_icon_name("edit-clear-symbolic");
+    untick.add_css_class("flat");
+    untick.set_tooltip_text(Some("Untick all"));
+    for w in [
+        ticked_label.upcast_ref::<gtk::Widget>(),
+        auto_place.upcast_ref(),
+        time.upcast_ref(),
+        move_course.upcast_ref(),
+        render.upcast_ref(),
+        to_resolve.button.upcast_ref(),
+        untick.upcast_ref(),
+    ] {
+        ticked_bar.append(w);
+    }
+    ticked_bar.set_visible(false);
+    content.append(&ticked_bar);
 
     // The Courses panel: all clips, those not timed yet, and each course.
     let course_list = gtk::ListBox::new();
@@ -264,6 +290,10 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         time: time.clone(),
         auto_place: auto_place.clone(),
         move_course: move_course.clone(),
+        ticked_bar,
+        ticked_label,
+        render: render.clone(),
+        to_resolve: to_resolve.button.clone(),
         stop: stop.clone(),
         course_list: course_list.clone(),
         rename: rename.clone(),
@@ -305,6 +335,21 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     open_file.connect_clicked(move |_| choose_file(&p));
     let p = page.clone();
     move_course.connect_clicked(move |_| move_ticked(&p));
+    let p = page.clone();
+    render.connect_clicked(move |_| {
+        let ids = ticked_runs(&p.state.borrow());
+        p.shared.render_runs(ids);
+    });
+    let p = page.clone();
+    to_resolve.on_pick(move |target| {
+        let ids = ticked_runs(&p.state.borrow());
+        p.shared.send_to_resolve(target, ids);
+    });
+    let p = page.clone();
+    untick.connect_clicked(move |_| {
+        p.state.borrow_mut().selected.clear();
+        refill(&p);
+    });
     let p = page.clone();
     course_list.connect_row_selected(move |_, row| {
         if p.filling.get() {
@@ -848,7 +893,20 @@ fn refresh_controls(p: &Page) {
     p.time.set_sensitive(s.selected.len() == 1);
     p.auto_place
         .set_sensitive(!s.busy && !s.selected.is_empty());
-    p.move_course.set_sensitive(!ticked_runs(&s).is_empty());
+    let runs = ticked_runs(&s).len();
+    p.move_course.set_sensitive(runs > 0);
+    p.render.set_sensitive(runs > 0);
+    p.to_resolve.set_sensitive(runs > 0);
+    let why = (runs == 0).then_some("None of the ticked clips is timed yet: time them first");
+    p.render.set_tooltip_text(Some(
+        why.unwrap_or("Render the ticked clips' timer overlays (on the Output page)"),
+    ));
+    p.to_resolve.set_tooltip_text(Some(why.unwrap_or(
+        "Put the ticked clips' runs in DaVinci Resolve, rendering any overlay that's missing or out of date first",
+    )));
+    p.ticked_bar.set_visible(!s.selected.is_empty());
+    p.ticked_label
+        .set_text(&ticked_text(s.selected.len(), runs));
     p.rename.set_sensitive(matches!(s.view, View::Course(_)));
     p.proxies.set_tooltip_text(Some(if s.selected.is_empty() {
         "Make a proxy for every clip without one"
@@ -1202,6 +1260,25 @@ fn lap_text(r: &RunInfo) -> String {
     }
 }
 
+/// "3 clips ticked · 2 timed" for the bar over the table.
+fn ticked_text(clips: usize, runs: usize) -> String {
+    let timed = if runs == clips {
+        if clips == 1 {
+            "timed".to_owned()
+        } else {
+            "all timed".to_owned()
+        }
+    } else if runs == 0 {
+        "not timed yet".to_owned()
+    } else {
+        format!("{runs} timed")
+    };
+    format!(
+        "{clips} {} ticked · {timed}",
+        plural(clips, "clip", "clips")
+    )
+}
+
 /// The run ids of the ticked clips that have runs.
 fn ticked_runs(s: &State) -> Vec<String> {
     let mut ids: Vec<String> = s
@@ -1384,6 +1461,14 @@ mod tests {
         assert!(shown_in(&View::Course("lw".into()), Some(a)));
         assert!(!shown_in(&View::Course("other".into()), Some(a)));
         assert!(!shown_in(&View::Course("lw".into()), None));
+    }
+
+    #[test]
+    fn the_ticked_bar_says_how_many_are_timed() {
+        assert_eq!(ticked_text(1, 1), "1 clip ticked · timed");
+        assert_eq!(ticked_text(3, 3), "3 clips ticked · all timed");
+        assert_eq!(ticked_text(3, 2), "3 clips ticked · 2 timed");
+        assert_eq!(ticked_text(2, 0), "2 clips ticked · not timed yet");
     }
 
     #[test]
