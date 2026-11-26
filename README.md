@@ -25,12 +25,19 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   **Use this run as the reference**); **Find the course** tries every course.
   Markers it is less sure of are highlighted to check by eye. In the Library,
   **Auto-place ticked** does this for many clips at once, as drafts to check.
-- **Runs**: a leaderboard per course from your run database (best lap, optimal
-  lap, sector times with the fastest highlighted). Tick runs to move them to
-  another course, ignore them or delete them; add or rename courses. Each change
-  is saved at once, with a backup in `timer_db.yaml.backups/`, and never over
-  changes the Resolve script made meanwhile.
-- **Output**: tick runs on the Runs page and press **Render overlays** (or
+- **Library**: tick clips and a bar appears over the table with what you can
+  do with them: **Auto-place**, **Time it**, move their runs to another
+  **Course…**, **Render overlays**, or **Resolve** (add to the open timeline,
+  or a new project). Rendering and Resolve use the ticked clips' runs, so a
+  clip has to be timed first. Courses are added and renamed in the Courses
+  panel.
+- **Leaderboards**: a leaderboard per course from your run database (best lap,
+  optimal lap, sector times with the fastest highlighted). Tick runs to move
+  them to another course, ignore them, delete them, render their overlays or
+  send them to Resolve. Each change is saved at once, with a backup in
+  `timer_db.yaml.backups/`, and never over changes the Resolve script made
+  meanwhile.
+- **Output**: tick clips in the Library (or runs on Leaderboards) and press **Render overlays** (or
   **Add runs without overlays** here) to render each run's timer overlay: a
   transparent ProRes 4444 `.mov` with the clip's timecode, in an `Overlays`
   folder beside the clip (or the folder set in Settings). It compares each

@@ -1,10 +1,10 @@
 //! The Output page: a queue of runs whose timer overlays to render. Runs come
-//! from the Runs page (Render overlays) or "Add runs without overlays"; each
+//! from the Library or Leaderboards (Render overlays) or "Add runs without overlays"; each
 //! renders in turn on a worker thread, using every core the machine's memory
 //! allows ([`timer_render::encode::plan`]). A finished overlay is recorded in
 //! the library, so the Resolve bridge can find it.
 //!
-//! Runs sent to Resolve from the Runs page come here too: overlays already
+//! Runs sent to Resolve from the Library or Leaderboards come here too: overlays already
 //! rendered for the run's current markers are used as they are, the rest are
 //! rendered first, then they all go to Resolve together.
 
@@ -153,7 +153,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     empty.set_icon_name(Some("video-x-generic-symbolic"));
     empty.set_title("Nothing to render");
     empty.set_description(Some(
-        "Tick runs on the Runs page and press Render overlays, or add every run that has no overlay yet.",
+        "Tick clips in the Library (or runs on Leaderboards) and press Render overlays, or add every run that has no overlay yet.",
     ));
     views.add_named(&empty, Some("empty"));
     let list = gtk::ListBox::new();

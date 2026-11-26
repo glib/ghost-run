@@ -1,6 +1,8 @@
-//! The Runs page: a leaderboard per course from the run database, with best
-//! and optimal laps, and batch edits (move to another course, ignore, delete;
-//! add and rename courses). Edits are saved at once through
+//! The Leaderboards page (`runs` in the sidebar's names): a leaderboard per
+//! course from the run database, with best and optimal laps and sector times,
+//! and batch edits (move to another course, ignore, delete) plus rendering and
+//! Resolve for the ticked runs. Courses are added and renamed in the Library's
+//! Courses panel. Edits are saved at once through
 //! [`timer_core::file::DatabaseFile`], which backs the file up first and won't
 //! write over changes made elsewhere.
 
@@ -16,7 +18,7 @@ use timer_core::edit::{self, EditError};
 use timer_core::file::{DatabaseFile, SaveError};
 use timer_core::timing::{format_delta, format_duration};
 
-use crate::shared::{Change, ResolveTarget, Shared};
+use crate::shared::{Change, Shared};
 
 struct State {
     file: Option<DatabaseFile>,
@@ -47,11 +49,9 @@ struct Page {
 pub fn page(shared: &Shared) -> gtk::Widget {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Runs", "")));
-    let new_course = button("New course…");
+    header.set_title_widget(Some(&adw::WindowTitle::new("Leaderboards", "")));
     let reload = gtk::Button::from_icon_name("view-refresh-symbolic");
     reload.set_tooltip_text(Some("Reload the run database"));
-    header.pack_end(&new_course);
     header.pack_end(&reload);
     root.append(&header);
 
@@ -76,9 +76,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let course_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let courses = gtk::DropDown::from_strings(&[]);
     courses.update_property(&[gtk::accessible::Property::Label("Course")]);
-    let rename = button("Rename…");
     course_row.append(&courses);
-    course_row.append(&rename);
     body.append(&course_row);
     let summary = label("", "heading");
     summary.set_wrap(true);
@@ -96,37 +94,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let include = button("Count again");
     let render = button("Render overlays");
     render.set_tooltip_text(Some("Render these runs' timer overlays (Output page)"));
-    let to_resolve = button("");
-    let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    face.append(&gtk::Label::new(Some("Resolve")));
-    face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
-    to_resolve.set_child(Some(&face));
-    to_resolve.set_tooltip_text(Some(
-        "Put these runs in DaVinci Resolve, rendering any overlay that's missing or out of date first",
-    ));
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    let to_timeline = gtk::Button::with_label("Add to open timeline");
-    to_timeline.set_tooltip_text(Some(
-        "Put each overlay on the track above its clip in Resolve's current timeline, adding clips that aren't there yet at its end",
-    ));
-    let to_project = gtk::Button::with_label("New project…");
-    to_project.set_tooltip_text(Some(
-        "Start a Resolve project with these runs back to back: clips on V1, overlays on V2",
-    ));
-    for b in [&to_timeline, &to_project] {
-        b.add_css_class("flat");
-        if let Some(l) = b.child().and_downcast::<gtk::Label>() {
-            l.set_xalign(0.);
-        }
-        menu.append(b);
-    }
-    let popover = gtk::Popover::new();
-    popover.set_child(Some(&menu));
-    popover.set_parent(&to_resolve);
-    let shown = popover.clone();
-    to_resolve.connect_clicked(move |_| shown.popup());
-    let parented = popover.clone();
-    to_resolve.connect_destroy(move |_| parented.unparent());
+    let to_resolve = crate::resolve_menu::menu();
     let delete = button("Delete…");
     delete.add_css_class("destructive-action");
     for w in [
@@ -135,7 +103,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         ignore.upcast_ref(),
         include.upcast_ref(),
         render.upcast_ref(),
-        to_resolve.upcast_ref(),
+        to_resolve.button.upcast_ref(),
         delete.upcast_ref(),
     ] {
         actions.append(w);
@@ -205,10 +173,6 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         }
     });
     let p = page.clone();
-    new_course.connect_clicked(move |_| new_course_dialog(&p));
-    let p = page.clone();
-    rename.connect_clicked(move |_| rename_dialog(&p));
-    let p = page.clone();
     move_to.connect_clicked(move |_| move_dialog(&p));
     let p = page.clone();
     ignore.connect_clicked(move |_| {
@@ -231,17 +195,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         let ids = selected(&p);
         p.shared.render_runs(ids);
     });
-    for (b, target) in [
-        (&to_timeline, ResolveTarget::Timeline),
-        (&to_project, ResolveTarget::NewProject),
-    ] {
-        let (p, popover) = (page.clone(), popover.clone());
-        b.connect_clicked(move |_| {
-            popover.popdown();
-            let ids = selected(&p);
-            p.shared.send_to_resolve(target, ids);
-        });
-    }
+    let p = page.clone();
+    to_resolve.on_pick(move |target| p.shared.send_to_resolve(target, selected(&p)));
     let p = page.clone();
     shared.subscribe(move |change| {
         // Our own saves are already shown; other pages' (and new settings) are not.
@@ -343,7 +298,7 @@ fn show(p: &Page) {
         .and_then(|c| db.courses.iter().find(|x| &x.id == c))
     else {
         p.summary
-            .set_text("No courses yet: add one with New course….");
+            .set_text("No courses yet: add one with New… in the Library's Courses panel.");
         p.table_holder.set_child(None::<&gtk::Widget>);
         p.actions.set_visible(false);
         return;
@@ -664,35 +619,6 @@ fn delete_dialog(p: &Page) {
             });
         },
     );
-}
-
-fn new_course_dialog(p: &Page) {
-    let p2 = p.clone();
-    crate::courses::new_course(&p.shared, move |result| match result {
-        Ok((id, text)) => {
-            p2.state.borrow_mut().course = Some(id);
-            show(&p2);
-            p2.status.set_text(&text);
-        }
-        Err(e) => p2.status.set_text(&e),
-    });
-}
-
-fn rename_dialog(p: &Page) {
-    let s = p.state.borrow();
-    let Some(course) = s
-        .course
-        .as_ref()
-        .and_then(|c| s.db.as_ref()?.courses.iter().find(|x| &x.id == c))
-        .cloned()
-    else {
-        return;
-    };
-    drop(s);
-    let p2 = p.clone();
-    crate::courses::rename_course(&p.shared, &course.id, &course.name, move |result| {
-        p2.status.set_text(&result.unwrap_or_else(|e| e));
-    });
 }
 
 fn label(text: &str, class: &str) -> gtk::Label {
