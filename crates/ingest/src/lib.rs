@@ -6,6 +6,7 @@ pub mod diagnostics;
 pub mod discovery;
 pub mod errors;
 pub mod jobs;
+pub mod layout;
 pub mod media;
 pub mod model;
 pub mod pipeline;

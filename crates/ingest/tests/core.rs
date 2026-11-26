@@ -416,3 +416,37 @@ fn camera_data_streams_can_omit_codec_name() {
     assert_eq!(probe.streams[0].codec_name, "unknown");
     assert_eq!(probe.notices().len(), 2);
 }
+
+#[tokio::test]
+async fn imports_land_in_the_recording_day_and_a_second_import_never_overwrites() {
+    let f = Fixture::new();
+    let name = "DJI_20260826184226_0027_D.MP4";
+    fs::write(f.settings.source.join(name), b"camera bytes").unwrap();
+    let mut jobs = Jobs::open(&f.dir.path().join("jobs")).unwrap();
+    let mut placed = Vec::new();
+    for _ in 0..2 {
+        let mut b = ingest::pipeline::plan(
+            f.settings.clone(),
+            vec![f.candidate(name)],
+            &Cancel::default(),
+        )
+        .await
+        .unwrap();
+        ingest::pipeline::run(&mut jobs, &mut b, None, &Cancel::default(), &events())
+            .await
+            .unwrap();
+        assert!(b.items[0].complete());
+        placed.push(b.items[0].archive_path.display().to_string());
+    }
+    assert_eq!(
+        placed,
+        [
+            format!("2026/2026-08-26/{name}"),
+            format!("2026/2026-08-26/2/{name}")
+        ]
+    );
+    let archive = &f.settings.archive.as_ref().unwrap().path;
+    for p in &placed {
+        assert_eq!(fs::read(archive.join(p)).unwrap(), b"camera bytes");
+    }
+}

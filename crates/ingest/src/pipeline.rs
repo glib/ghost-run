@@ -1,9 +1,9 @@
 use crate::{
     jobs::Jobs,
-    media,
+    layout, media,
     model::*,
     settings::{Destination, Settings, Workflow},
-    storage::{Root, reject_overlap, safe_relative},
+    storage::{Root, reject_overlap},
     verification,
 };
 use anyhow::{Context, Result, ensure};
@@ -23,7 +23,7 @@ pub async fn plan(
         return plan_conversion(settings, candidates, cancel).await;
     }
     let skipped = candidates.iter().filter(|c| !c.selected).count();
-    let selected: Vec<_> = candidates.into_iter().filter(|c| c.selected).collect();
+    let selected: Vec<&Candidate> = candidates.iter().filter(|c| c.selected).collect();
     ensure!(
         !selected.is_empty(),
         "Select at least one original to archive."
@@ -64,32 +64,36 @@ pub async fn plan(
         None
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let base = PathBuf::from(chrono::Utc::now().format("%Y-%m-%d").to_string()).join(&id);
-    let mut items = Vec::new();
-    let mut archive_bytes = 0u64;
-    let mut editing_bytes = 0u64;
-    for c in selected {
-        cancel.check()?;
+    for c in &selected {
         ensure!(
             c.relative.to_str().is_some(),
             "Non-UTF8 filenames cannot be journaled in v1: {:?}. Rename a copy before ingest.",
             c.relative
         );
+    }
+    let archive_paths = layout::archive_paths(&candidates, &selected, |p| {
+        Ok(ar.exists(p)?
+            || match &ed {
+                Some(ed) => ed.exists(&layout::editing_path(p)?)?,
+                None => false,
+            })
+    })?;
+    let mut items = Vec::new();
+    let mut archive_bytes = 0u64;
+    let mut editing_bytes = 0u64;
+    for (c, archive_path) in selected.into_iter().cloned().zip(archive_paths) {
+        cancel.check()?;
         let file = source.read(&c.relative)?;
         ensure!(
             Identity::of(&file.metadata()?) == c.identity,
             "Source changed since scanning: {}. Rescan the card.",
             c.relative.display()
         );
-        let safe = safe_relative(&c.relative)?;
-        let archive_path = base.join("originals").join(&safe);
-        // Retain the encoded original extension and append .mov: same-stem inputs stay distinct.
-        let editing_path = c.editing.then(|| {
-            base.join("clips").join(&safe).with_file_name(format!(
-                "{}.mov",
-                safe.file_name().unwrap().to_string_lossy()
-            ))
-        });
+        // The original extension stays and .mov is added: same-stem inputs stay distinct.
+        let editing_path = c
+            .editing
+            .then(|| layout::editing_path(&archive_path))
+            .transpose()?;
         ensure!(
             !ar.exists(&archive_path)?,
             "Archive conflict: {}",
@@ -515,20 +519,7 @@ pub async fn prepare_archived_editing(
         probe.video().is_some_and(|v| v.pix_fmt.is_some()) && probe.duration() > 0.,
         "No decodable motion video. Keep this file archive only."
     );
-    let mut parts = item.archive_path.components();
-    let base: PathBuf = parts.by_ref().take(2).collect();
-    ensure!(
-        parts.next().is_some_and(|c| c.as_os_str() == "originals"),
-        "Unrecognized archive path layout"
-    );
-    let relative: PathBuf = parts.collect();
-    let target = base.join("clips").join(&relative).with_file_name(format!(
-        "{}.mov",
-        relative
-            .file_name()
-            .context("Missing source filename")?
-            .to_string_lossy()
-    ));
+    let target = layout::editing_path(&item.archive_path)?;
     ensure!(
         !ed.exists(&target)?,
         "Editing target already exists. Inspect the conflict before requesting conversion."
