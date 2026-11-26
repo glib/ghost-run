@@ -8,6 +8,8 @@
 //! - [`proxy`]: half-resolution ProRes Proxy copies in a `Proxy` folder beside
 //!   each clip, frame for frame and timecode for timecode the same as the clip,
 //!   shared by Resolve, the frame viewer and auto-markers.
+//! - [`footage`]: the NAS footage root and local editing copies.
+//! - [`preview`]: the catalog's small preview and audio of NAS clips.
 //! - [`overlays`]: where rendered overlays go.
 //! - [`backup`]: whether each clip's original is verified on the NAS.
 //! - [`catalog_backup`]: a daily copy of the catalog and run database on the NAS.
@@ -17,8 +19,10 @@
 pub mod auto;
 pub mod backup;
 pub mod catalog_backup;
+pub mod footage;
 pub mod frames;
 pub mod overlays;
+pub mod preview;
 pub mod probe;
 pub mod proxy;
 pub mod scan;

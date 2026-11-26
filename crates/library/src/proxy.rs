@@ -192,6 +192,40 @@ pub fn make_with(
     if let Some(tc) = &clip.timecode {
         cmd.args(["-timecode", tc]);
     }
+    cmd.arg(&partial);
+    if let Err(e) = run(cmd, total, cancel, &mut progress) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+    let fail = |message: String| {
+        let _ = std::fs::remove_file(&partial);
+        Err(anyhow::anyhow!(message))
+    };
+    // FFmpeg 7 carries the rotation flag through a re-encode with
+    // -noautorotate; FFmpeg 8 drops it. Put it back with a lossless remux.
+    if clip.rotation != 0
+        && probe::probe(&partial).is_ok_and(|p| p.rotation != clip.rotation)
+        && let Err(e) = set_rotation(&partial, clip)
+    {
+        return fail(format!("could not set the proxy's rotation: {e:#}"));
+    }
+    if let Err(e) = verify(clip_path, clip, &partial) {
+        return fail(format!("the new proxy didn't match the clip: {e:#}"));
+    }
+    std::fs::rename(&partial, &out).with_context(|| format!("writing {}", out.display()))?;
+    progress(1.0);
+    Ok(out)
+}
+
+/// Runs an ffmpeg command that writes `-progress pipe:1`, reporting the share
+/// of `total` frames done; kills it when `cancel` is set. Errors are
+/// "cancelled" or ffmpeg's own message.
+pub(crate) fn run(
+    mut cmd: Command,
+    total: Option<i64>,
+    cancel: &Cancel,
+    progress: &mut dyn FnMut(f64),
+) -> Result<()> {
     // If the app dies mid-encode, ffmpeg goes with it rather than running on.
     // SAFETY: prctl is async-signal-safe and touches no memory of ours.
     unsafe {
@@ -202,7 +236,6 @@ pub fn make_with(
         });
     }
     let mut child = cmd
-        .arg(&partial)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -230,34 +263,17 @@ pub fn make_with(
     }
     let status = child.wait()?;
     let errors = errors.join().unwrap_or_default();
-    let fail = |message: String| {
-        let _ = std::fs::remove_file(&partial);
-        Err(anyhow::anyhow!(message))
-    };
     if stopped || cancelled(cancel) {
-        return fail("cancelled".into());
+        bail!("cancelled");
     }
     if !status.success() {
-        return fail(format!("ffmpeg failed: {}", errors.trim()));
+        bail!("ffmpeg failed: {}", errors.trim());
     }
-    // FFmpeg 7 carries the rotation flag through a re-encode with
-    // -noautorotate; FFmpeg 8 drops it. Put it back with a lossless remux.
-    if clip.rotation != 0
-        && probe::probe(&partial).is_ok_and(|p| p.rotation != clip.rotation)
-        && let Err(e) = set_rotation(&partial, clip)
-    {
-        return fail(format!("could not set the proxy's rotation: {e:#}"));
-    }
-    if let Err(e) = verify(clip_path, clip, &partial) {
-        return fail(format!("the new proxy didn't match the clip: {e:#}"));
-    }
-    std::fs::rename(&partial, &out).with_context(|| format!("writing {}", out.display()))?;
-    progress(1.0);
-    Ok(out)
+    Ok(())
 }
 
 /// Rewrites `partial` with the clip's rotation flag (stream copy, so quick).
-fn set_rotation(partial: &Path, clip: &MediaInfo) -> Result<()> {
+pub(crate) fn set_rotation(partial: &Path, clip: &MediaInfo) -> Result<()> {
     let tmp = partial.with_extension("rotating.mov");
     let mut cmd = Command::new("ffmpeg");
     cmd.args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])

@@ -511,6 +511,7 @@ fn open_path(p: &Page, path: &Path) {
                     },
                     info: Some(info),
                     probe_error: None,
+                    ..Clip::default()
                 }
             }
             Err(e) => {
@@ -527,12 +528,15 @@ fn open_clip(p: &Page, clip: Clip) {
     let Some(info) = clip.info.clone() else {
         return;
     };
-    let (view, view_info) = match &clip.proxy {
-        ProxyState::Ready(proxy) => match library::probe::probe(proxy) {
-            Ok(i) => (proxy.clone(), i),
+    // The proxy, else the catalog's preview, else the local copy, else the clip.
+    let source = clip.frames_from();
+    let (view, view_info) = if source == clip.path {
+        (clip.path.clone(), info.clone())
+    } else {
+        match library::probe::probe(&source) {
+            Ok(i) => (source, i),
             Err(_) => (clip.path.clone(), info.clone()),
-        },
-        _ => (clip.path.clone(), info.clone()),
+        }
     };
     let frames = info
         .frames
@@ -543,6 +547,8 @@ fn open_clip(p: &Page, clip: Clip) {
         .unwrap_or(1)
         .max(1);
     let using_proxy = view != clip.path;
+    let reading_proxy = matches!(&clip.proxy, ProxyState::Ready(p) if *p == view);
+    let reading_preview = clip.preview.as_ref() == Some(&view);
     let fps = info.fps();
     p.title.set_subtitle(&clip.name());
     p.picture.set_paintable(gdk::Paintable::NONE);
@@ -606,7 +612,13 @@ fn open_clip(p: &Page, clip: Clip) {
     p.status.set_text(&match (&draft, &run) {
         (Some(_), _) => "Carrying on with the markers you placed last time (not committed yet).".to_owned(),
         (None, Some(r)) => format!("This clip is {}: its markers are loaded.", r.id),
-        (None, None) if using_proxy => "Reading frames from the proxy.".to_owned(),
+        (None, None) if reading_proxy => {
+            "Reading frames from the proxy.".to_owned()
+        }
+        (None, None) if reading_preview => {
+            "Reading frames from the catalog's preview (the original is on the NAS).".to_owned()
+        }
+        (None, None) if using_proxy => "Reading frames from the local copy.".to_owned(),
         (None, None) => "No proxy yet: frames come from the original, which is slower. Make one in the Library for quick stepping.".to_owned(),
     });
     show(p);

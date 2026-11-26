@@ -20,7 +20,7 @@ use timer_core::markers::{expected_marker_names, parse_marker_snapshot, raw_mark
 use timer_core::models::{Course, MarkerFrames, RunRecord};
 use timer_core::stats::{StatsOptions, compute_course_stats};
 
-use crate::store::{Clip, Library, ProxyState};
+use crate::store::{Clip, Library};
 
 /// A placed marker less sure than this is worth checking by eye.
 pub const CHECK_BELOW: f64 = 0.3;
@@ -33,7 +33,8 @@ pub struct Reference {
     pub course_id: String,
     pub run_id: String,
     pub lap_seconds: f64,
-    /// The file read: the run's clip's proxy if it has one, else the clip.
+    /// The file read: the run's clip's proxy, preview or local copy if it
+    /// has one, else the clip.
     pub footage: PathBuf,
     /// Marker name → frame, in order along the course.
     pub markers: Vec<(String, i64)>,
@@ -74,12 +75,9 @@ impl Placement {
     }
 }
 
-/// The file to read a clip's frames from: its proxy if it has one.
+/// The file to read a clip's frames from ([`Clip::frames_from`]).
 pub fn footage(clip: &Clip) -> PathBuf {
-    match &clip.proxy {
-        ProxyState::Ready(proxy) => proxy.clone(),
-        _ => clip.path.clone(),
-    }
+    clip.frames_from()
 }
 
 /// The library clip a stored run was timed on: its source path if that's
@@ -91,7 +89,11 @@ pub fn footage(clip: &Clip) -> PathBuf {
 pub fn run_clip(run: &RunRecord, clips: &[Clip]) -> Option<Clip> {
     if let Some(path) = run.source_path.as_deref().filter(|p| !p.is_empty()) {
         let path = Path::new(path);
-        if let Some(clip) = clips.iter().find(|c| c.path == path) {
+        // Timed on the clip, or on a NAS original's local copy.
+        if let Some(clip) = clips
+            .iter()
+            .find(|c| c.path == path || c.local.as_deref() == Some(path))
+        {
             return Some(clip.clone());
         }
         if let Ok(real) = path.canonicalize()
@@ -104,13 +106,7 @@ pub fn run_clip(run: &RunRecord, clips: &[Clip]) -> Option<Clip> {
         if path.is_file() {
             return Some(Clip {
                 path: path.to_owned(),
-                size: 0,
-                modified_ns: 0,
-                recorded: None,
-                recorded_source: String::new(),
-                info: None,
-                probe_error: None,
-                proxy: ProxyState::Missing,
+                ..Clip::default()
             });
         }
     }
@@ -242,6 +238,7 @@ pub fn cache_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::ProxyState;
 
     fn clip_at(path: &Path) -> Clip {
         Clip {
@@ -253,6 +250,7 @@ mod tests {
             info: None,
             probe_error: None,
             proxy: ProxyState::Ready(path.with_extension("proxy.mov")),
+            ..Clip::default()
         }
     }
 
