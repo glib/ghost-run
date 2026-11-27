@@ -566,9 +566,18 @@ fn plan_clips(kind: &Kind, input: &str, sources: Sources) -> Result<Plan> {
                     let stat = |f: &dyn Fn(&crate::strava::Span) -> Option<String>| {
                         span.as_ref().and_then(f).unwrap_or_default()
                     };
-                    v.insert("distance", stat(&|s| Some(format!("{:.1} km in", s.distance_km?))));
-                    v.insert("top_speed", stat(&|s| Some(format!("{:.0} km/h top", s.top_kmh?))));
-                    v.insert("speed", stat(&|s| Some(format!("{:.0} km/h", s.average_kmh?))));
+                    v.insert(
+                        "distance",
+                        stat(&|s| Some(format!("{:.1} km in", s.distance_km?))),
+                    );
+                    v.insert(
+                        "top_speed",
+                        stat(&|s| Some(format!("{:.0} km/h top", s.top_kmh?))),
+                    );
+                    v.insert(
+                        "speed",
+                        stat(&|s| Some(format!("{:.0} km/h", s.average_kmh?))),
+                    );
                     v.insert("hr", stat(&|s| Some(format!("{:.0} bpm", s.average_bpm?))));
                     v.insert("climb", stat(&|s| Some(format!("{:.0} m up", s.climb_m?))));
                     v.insert("ride", ride.map(|r| r.title()).unwrap_or_default());
@@ -1010,6 +1019,47 @@ mod tests {
         let ridelog = plan(&kind("ridelog"), "a.mp4.1", sources).unwrap();
         assert_eq!(ridelog.title, "Mon 1 Jun 2026, 10:00");
         assert_eq!(ridelog.items.len(), 4);
+        assert!(ridelog.items.iter().all(|i| i.caption.is_none()));
+
+        // With Strava: the ride from 9:50, at 5 m/s and 150 bpm.
+        let seconds: Vec<f64> = (0..7200).map(f64::from).collect();
+        let streams = crate::strava::Streams {
+            velocity: vec![5.0; seconds.len()],
+            heartrate: vec![150.0; seconds.len()],
+            altitude: seconds.iter().map(|t| t / 10.0).collect(),
+            distance: seconds.iter().map(|t| t * 5.0).collect(),
+            time: seconds,
+            latlng: Vec::new(),
+        };
+        let strava = crate::strava::Index {
+            activities: vec![crate::strava::Activity {
+                id: 7,
+                name: "Morning ride".into(),
+                sport: "MountainBikeRide".into(),
+                start_local: chrono::NaiveDate::from_ymd_opt(2026, 6, 1)
+                    .unwrap()
+                    .and_hms_opt(9, 50, 0)
+                    .unwrap(),
+                elapsed_seconds: 7200,
+                distance_m: 36_000.0,
+                climb_m: 720.0,
+            }],
+            streams: [(7, streams)].into(),
+            ..Default::default()
+        };
+        let ridelog = plan(
+            &kind("ridelog"),
+            "a.mp4.1",
+            Sources {
+                strava: Some(&strava),
+                ..sources
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ridelog.items[1].caption.as_deref(),
+            Some("3.0 km in · 18 km/h top · 150 bpm")
+        );
     }
 
     #[test]

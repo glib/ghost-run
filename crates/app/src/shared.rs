@@ -29,6 +29,8 @@ pub enum Change {
     BuildVideo,
     /// Show the Videos page on a video ([`Shared::show_video`]).
     ShowVideo,
+    /// Strava was synced or disconnected (`crate::strava_ui`).
+    Strava,
 }
 
 /// Where runs sent to Resolve go.

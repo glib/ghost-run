@@ -48,3 +48,25 @@ pub fn open_folder(
         }
     });
 }
+
+/// Opens a web page in the browser, on the host when inside a Distrobox.
+/// Safe to call off the main thread.
+pub fn open_url(url: &str) -> std::io::Result<()> {
+    let in_box = Path::new("/run/.containerenv").exists()
+        && crate::resolve::which("distrobox-host-exec").is_some();
+    let mut command = if in_box {
+        let mut c = Command::new("distrobox-host-exec");
+        c.arg("xdg-open");
+        c
+    } else {
+        Command::new("xdg-open")
+    };
+    let mut child = command
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}

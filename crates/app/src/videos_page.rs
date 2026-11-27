@@ -1015,7 +1015,8 @@ fn new_video_dialog(p: &Page) {
             )
         })
         .collect();
-    let ride_choices: Vec<(String, String)> = catalog.rides(&clips)
+    let ride_choices: Vec<(String, String)> = catalog
+        .rides(&clips)
         .into_iter()
         .map(|r| {
             (
