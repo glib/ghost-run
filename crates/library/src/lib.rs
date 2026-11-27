@@ -21,6 +21,7 @@
 
 pub mod auto;
 pub mod backup;
+pub mod brand;
 pub mod catalog_backup;
 pub mod features;
 pub mod footage;

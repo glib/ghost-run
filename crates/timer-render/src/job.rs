@@ -38,6 +38,7 @@ pub struct Spec<'a> {
     /// ffmpeg processes and threads each; `None` plans them from cores and memory.
     pub jobs: Option<usize>,
     pub threads: Option<usize>,
+    pub style: crate::Style,
 }
 
 impl<'a> Spec<'a> {
@@ -51,6 +52,7 @@ impl<'a> Spec<'a> {
             hold: 5.0,
             jobs: None,
             threads: None,
+            style: crate::Style::default(),
         }
     }
 }
@@ -214,6 +216,7 @@ struct Job<'a> {
     height: u32,
     rate: FrameRate,
     plan: Plan,
+    style: crate::Style,
 }
 
 impl<'a> Job<'a> {
@@ -235,6 +238,7 @@ impl<'a> Job<'a> {
                 jobs: spec.jobs.unwrap_or(planned.jobs).max(1),
                 threads: spec.threads.unwrap_or(planned.threads).max(1),
             },
+            style: spec.style,
         })
     }
 
@@ -249,7 +253,8 @@ impl<'a> Job<'a> {
         tick: &(dyn Fn() + Sync),
         stopped: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), RenderError> {
-        let mut renderer = FrameRenderer::new(self.payload.clone(), self.width, self.height);
+        let mut renderer =
+            FrameRenderer::styled(self.payload.clone(), self.width, self.height, self.style);
         let mut panel = renderer.blank_panel();
         let mut encoder = Encoder::start(&Output {
             path,
