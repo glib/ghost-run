@@ -35,6 +35,7 @@ pub mod proxy;
 pub mod scan;
 pub mod settings;
 pub mod store;
+pub mod strava;
 pub mod thumbs;
 pub mod videos;
 

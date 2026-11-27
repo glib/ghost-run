@@ -644,7 +644,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     match Library::open_default().and_then(|l| l.clips()) {
         Ok(clips) => {
             let mut s = page.state.borrow_mut();
-            s.rides = organise::rides(&clips, &s.catalog.ride_names);
+            s.rides = s.catalog.rides(&clips);
             s.clips = clips;
         }
         Err(e) => page
@@ -1128,7 +1128,7 @@ fn handle(p: &Page, reply: Reply) {
             let present: HashSet<&PathBuf> = clips.iter().map(|c| &c.path).collect();
             s.selected.retain(|path| present.contains(path));
             s.local_bytes = library::hydrate::local_bytes(&clips, &s.roots);
-            s.rides = organise::rides(&clips, &s.catalog.ride_names);
+            s.rides = s.catalog.rides(&clips);
             s.clips = clips;
             drop(s);
             fill_courses(p);
@@ -1710,7 +1710,7 @@ fn load_runs(p: &Page) {
     s.catalog = Library::open_default()
         .and_then(|l| l.catalog())
         .unwrap_or_default();
-    s.rides = organise::rides(&s.clips, &s.catalog.ride_names);
+    s.rides = s.catalog.rides(&s.clips);
     s.uses = Library::open_default()
         .and_then(|l| Ok(library::videos::clip_uses(&l.videos()?, &l.usage()?)))
         .unwrap_or_default();

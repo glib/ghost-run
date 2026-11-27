@@ -79,7 +79,7 @@ pub struct Library {
 /// 5: course target times. 6: clips' local copy and preview. 7: tags, flags,
 /// collections and ride names. 8: videos, their clips and usage. 9: cards
 /// in videos.
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 impl Library {
     pub fn open_default() -> Result<Self> {
@@ -149,6 +149,7 @@ impl Library {
         Self::create_organise_tables(&db)?;
         Self::create_video_tables(&db)?;
         Self::create_feature_tables(&db)?;
+        Self::create_strava_tables(&db)?;
         db.pragma_update(None, "user_version", VERSION)?;
         Ok(Self { db })
     }

@@ -64,6 +64,9 @@ pub struct Catalog {
     pub collections: Vec<Collection>,
     /// Clip key → the name of the ride it's in (kept on one clip per ride).
     pub ride_names: HashMap<String, String>,
+    /// Clip key → the name of the Strava activity it was filmed in
+    /// (`crate::strava`): a ride's name when it hasn't been given one.
+    pub activity_names: HashMap<String, String>,
     /// By name (`crate::features`).
     pub features: Vec<crate::features::Feature>,
 }
@@ -81,6 +84,20 @@ impl Catalog {
             counts.into_iter().map(|(t, n)| (t.to_owned(), n)).collect();
         all.sort_by_key(|(t, _)| t.to_lowercase());
         all
+    }
+
+    /// The rides `clips` make, named by hand or else after their Strava
+    /// activity.
+    pub fn rides(&self, clips: &[Clip]) -> Vec<Ride> {
+        let mut rides = rides(clips, &self.ride_names);
+        for ride in rides.iter_mut().filter(|r| r.name.is_none()) {
+            ride.name = ride
+                .clips
+                .iter()
+                .find_map(|k| self.activity_names.get(k))
+                .cloned();
+        }
+        rides
     }
 
     pub fn tags_of(&self, key: &str) -> Option<&BTreeSet<String>> {
@@ -221,6 +238,16 @@ impl Library {
             c.ride_names.insert(clip, name);
         }
         c.features = self.features()?;
+        let activities = self.strava_activities()?;
+        if !activities.is_empty() {
+            for clip in self.clips()? {
+                if let Some(t) = crate::strava::recorded(&clip)
+                    && let Some(a) = activities.iter().find(|a| a.covers(t))
+                {
+                    c.activity_names.insert(key(&clip), a.name.clone());
+                }
+            }
+        }
         Ok(c)
     }
 

@@ -5,7 +5,9 @@
 # {attempts_text}, {days_text} ("3 clips", "1 day"), {date}, {first_date},
 # {latest_date}, {landed}, {result} ("Landed on attempt 4"); and in a clip's
 # caption, {attempt}, {day} (its day's number), {date}, {ride}, {course},
-# {lap}, {outcome}.
+# {lap}, {outcome}, and from Strava (empty without it): {distance} ("12.4 km
+# in"), {top_speed} ("52 km/h top"), {speed} (average), {hr} ("148 bpm"),
+# {climb} ("35 m up").
 
 id = "gear-review"
 name = "Gear review"
