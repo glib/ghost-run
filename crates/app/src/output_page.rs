@@ -36,6 +36,7 @@ struct Job {
     clip: PathBuf,
     out: PathBuf,
     fingerprint: String,
+    ghost: bool,
 }
 
 enum Reply {
@@ -133,6 +134,11 @@ pub fn page(shared: &Shared, activity: gtk::Label, close: impl Fn() + 'static) -
         "Best lap: the fastest run before this one. Optimal: the fastest of each sector before it, added up.",
     ));
     options.append(&compare);
+    let ghost = gtk::CheckButton::with_label("Ghost");
+    ghost.set_tooltip_text(Some(
+        "A live line under the timer: how far ahead or behind the comparison the run is, all the way down",
+    ));
+    options.append(&ghost);
     content.append(&options);
     let where_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let folder = label("", "dim-label");
@@ -261,6 +267,13 @@ pub fn page(shared: &Shared, activity: gtk::Label, close: impl Fn() + 'static) -
         };
         if p.shared.settings().comparison != mode {
             let _ = p.shared.update(|s| s.comparison = mode);
+        }
+    });
+    ghost.set_active(shared.settings().ghost);
+    let p = page.clone();
+    ghost.connect_toggled(move |c| {
+        if p.shared.settings().ghost != c.is_active() {
+            let _ = p.shared.update(|s| s.ghost = c.is_active());
         }
     });
     let p = page.clone();
@@ -401,7 +414,8 @@ fn render(
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     }
-    let spec = Spec::new(&job.payload, &job.out, Some(&info));
+    let mut spec = Spec::new(&job.payload, &job.out, Some(&info));
+    spec.style.ghost = job.ghost;
     let id = job.run_id.clone();
     let report = job::render(
         &spec,
@@ -630,6 +644,7 @@ fn build_video(p: &Page, id: i64) {
 fn make_video(p: &Page, id: i64) {
     let container = p.shared.settings().resolve_container.clone();
     let run_database = p.shared.settings().run_database.clone();
+    let brand_kit = p.shared.settings().brand_kit.clone();
     let tx = p.replies.clone();
     p.resolve_buttons.set_sensitive(false);
     p.resolve_status.remove_css_class("error");
@@ -637,8 +652,8 @@ fn make_video(p: &Page, id: i64) {
         .set_text("Building the video in Resolve (copying any clip only on the NAS here first)…");
     std::thread::spawn(move || {
         let bridge = crate::resolve::Bridge::new(container.as_deref());
-        let result =
-            create_video(&bridge, id, run_database.as_deref()).map_err(|e| format!("{e:#}"));
+        let result = create_video(&bridge, id, run_database.as_deref(), brand_kit.as_deref())
+            .map_err(|e| format!("{e:#}"));
         let _ = tx.send(Reply::VideoBuilt(result));
     });
 }
@@ -651,7 +666,9 @@ fn create_video(
     bridge: &crate::resolve::Bridge,
     id: i64,
     run_database: Option<&std::path::Path>,
+    brand_kit: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
+    let look = crate::cards::Look::load(brand_kit);
     use library::videos::{Status as VideoStatus, Use};
     let library = Library::open_default()?;
     let mut video = library
@@ -701,6 +718,7 @@ fn create_video(
                 (width as i32, height as i32),
                 &format!("{}/{}", info.fps_num, info.fps_den),
                 chart,
+                &look,
                 &file,
             )?;
             runs.push(serde_json::json!({
@@ -743,6 +761,7 @@ fn create_video(
                 (width as i32, height as i32),
                 &format!("{}/{}", info.fps_num, info.fps_den),
                 item.frames.max(1),
+                &look,
                 &file,
             )?;
             run["caption"] = serde_json::json!(file);
@@ -800,7 +819,7 @@ fn begin(p: &Page, send: Send, ids: Vec<String>) {
     let renders = Library::open_default()
         .and_then(|l| l.renders())
         .unwrap_or_default();
-    let (ready, stale) = split_rendered(&ids, &db, &renders);
+    let (ready, stale) = split_rendered(&ids, &db, &renders, p.shared.settings().ghost);
     queue(p, &ids);
     let mut s = p.state.borrow_mut();
     for r in &ready {
@@ -880,10 +899,18 @@ fn settle(p: &Page) {
     }
 }
 
-/// Whether `done` is the overlay for `run` as it is now: the file is there
-/// and the run's markers haven't changed since.
-fn is_current(done: &Rendered, run: &timer_core::models::RunRecord) -> bool {
-    done.overlay.exists() && done.fingerprint == run.fingerprint.clone().unwrap_or_default()
+/// Whether `done` is the overlay for `run` as it is now: the file is there,
+/// the run's markers haven't changed since, and it has the ghost or not as
+/// wanted.
+fn is_current(done: &Rendered, run: &timer_core::models::RunRecord, ghost: bool) -> bool {
+    done.overlay.exists() && done.fingerprint == wanted_fingerprint(run, ghost)
+}
+
+/// What a render of `run` is recorded with: the run's fingerprint, marked
+/// when the overlay has the ghost.
+fn wanted_fingerprint(run: &timer_core::models::RunRecord, ghost: bool) -> String {
+    let fp = run.fingerprint.clone().unwrap_or_default();
+    if ghost { format!("{fp}+ghost") } else { fp }
 }
 
 /// `ids` split into the overlays already rendered and up to date, and the
@@ -892,13 +919,14 @@ fn split_rendered(
     ids: &[String],
     db: &TimerDatabase,
     renders: &HashMap<String, Rendered>,
+    ghost: bool,
 ) -> (Vec<Rendered>, Vec<String>) {
     let mut ready = Vec::new();
     let mut stale = Vec::new();
     for id in ids {
         let run = db.runs.iter().find(|r| &r.id == id);
         match (run, renders.get(id)) {
-            (Some(run), Some(done)) if is_current(done, run) => ready.push(done.clone()),
+            (Some(run), Some(done)) if is_current(done, run, ghost) => ready.push(done.clone()),
             _ => stale.push(id.clone()),
         }
     }
@@ -1179,7 +1207,8 @@ fn prepare(p: &Page, run_id: &str) -> Result<Job, String> {
         payload,
         clip,
         out,
-        fingerprint: run.fingerprint.clone().unwrap_or_default(),
+        fingerprint: wanted_fingerprint(run, settings.ghost),
+        ghost: settings.ghost,
     })
 }
 
@@ -1218,6 +1247,7 @@ fn queue(p: &Page, ids: &[String]) {
 
 /// Queues every counted run without an up-to-date overlay.
 fn add_unrendered(p: &Page) {
+    let ghost = p.shared.settings().ghost;
     let Some(path) = p.shared.settings().run_database.clone() else {
         p.status
             .set_text("Choose your run database first (the gear in the sidebar).");
@@ -1238,7 +1268,11 @@ fn add_unrendered(p: &Page) {
         .runs
         .iter()
         .filter(|r| r.committed && !r.ignored)
-        .filter(|r| !renders.get(&r.id).is_some_and(|done| is_current(done, r)))
+        .filter(|r| {
+            !renders
+                .get(&r.id)
+                .is_some_and(|done| is_current(done, r, ghost))
+        })
         .map(|r| r.id.clone())
         .collect();
     let n = ids.len();
@@ -1457,7 +1491,7 @@ mod tests {
         let ids: Vec<String> = ["new", "fresh", "moved", "gone", "not-in-db"]
             .map(String::from)
             .into();
-        let (ready, stale) = split_rendered(&ids, &db, &renders);
+        let (ready, stale) = split_rendered(&ids, &db, &renders, false);
         assert_eq!(
             ready.iter().map(|r| r.run_id.as_str()).collect::<Vec<_>>(),
             ["fresh"]

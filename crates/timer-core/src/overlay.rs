@@ -305,6 +305,48 @@ impl OverlayPayload {
     pub fn elapsed_seconds(&self, frame: i64) -> f64 {
         (frame.min(self.finish_frame) - self.start_frame).max(0) as f64 / self.source_fps
     }
+
+    /// The live gap to the comparison lap (the "ghost") at clip frame
+    /// `frame`: the time so far less the ghost's time to the same point,
+    /// taking the ghost to ride each sector at an even pace. Negative is
+    /// ahead. `None` before the start, or when a sector has nothing to
+    /// compare with.
+    pub fn ghost_gap(&self, frame: i64) -> Option<f64> {
+        if frame < self.start_frame || self.sector_reference_seconds.iter().any(Option::is_none) {
+            return None;
+        }
+        let frame = frame.min(self.finish_frame);
+        let count = self.sector_count();
+        let mut ghost = 0.0;
+        for sector in 1..=count {
+            let start = if sector == 1 {
+                "Start".to_owned()
+            } else {
+                format!("S{}", sector - 1)
+            };
+            let end = if sector == count {
+                "Finish".to_owned()
+            } else {
+                format!("S{sector}")
+            };
+            let (a, b) = (
+                *self.marker_frames.get(&start)?,
+                *self.marker_frames.get(&end)?,
+            );
+            let reference = (*self.sector_reference_seconds.get(sector - 1)?)?;
+            if frame <= b || sector == count {
+                let part = if b > a {
+                    ((frame - a) as f64 / (b - a) as f64).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                ghost += reference * part;
+                return Some(self.elapsed_seconds(frame) - ghost);
+            }
+            ghost += reference;
+        }
+        None
+    }
 }
 
 /// `M:SS.mmm`; durations here are never negative (the markers are validated).
@@ -324,6 +366,49 @@ pub fn delta_color(delta: Option<f64>) -> [f32; 4] {
         Some(d) if d < 0.0 => [0.2, 1.0, 0.45, 1.0],
         Some(d) if d > 0.0 => [1.0, 0.3, 0.25, 1.0],
         Some(_) => [1.0, 0.76, 0.18, 1.0],
+    }
+}
+
+#[cfg(test)]
+mod ghost_tests {
+    use super::*;
+
+    fn payload(references: Vec<Option<f64>>) -> OverlayPayload {
+        // At 10 fps: S1 is 10 s (frames 100–200), S2 is 20 s (200–400).
+        OverlayPayload {
+            course_id: "c".into(),
+            run_id: None,
+            start_frame: 100,
+            finish_frame: 400,
+            source_fps: 10.0,
+            marker_frames: [("Start", 100), ("S1", 200), ("Finish", 400)]
+                .iter()
+                .map(|(n, f)| ((*n).to_owned(), *f))
+                .collect(),
+            sector_reference_seconds: references,
+            best_lap_seconds: None,
+            optimal_lap_seconds: None,
+            comparison_mode: ComparisonMode::BestLap,
+        }
+    }
+
+    #[test]
+    fn the_ghost_rides_each_sector_at_an_even_pace() {
+        // The ghost did S1 in 12 s and S2 in 16 s.
+        let p = payload(vec![Some(12.0), Some(16.0)]);
+        assert_eq!(p.ghost_gap(50), None);
+        assert_eq!(p.ghost_gap(100), Some(0.0));
+        // Half way through S1: 5 s ridden, the ghost 6 s.
+        assert!((p.ghost_gap(150).unwrap() - -1.0).abs() < 1e-9);
+        // At S1: 10 against 12.
+        assert!((p.ghost_gap(200).unwrap() - -2.0).abs() < 1e-9);
+        // Half way through S2: 20 s against 12 + 8.
+        assert!((p.ghost_gap(300).unwrap() - 0.0).abs() < 1e-9);
+        // Finished (and after): 30 against 28.
+        assert!((p.ghost_gap(400).unwrap() - 2.0).abs() < 1e-9);
+        assert!((p.ghost_gap(999).unwrap() - 2.0).abs() < 1e-9);
+        // Nothing to compare a sector with: no ghost.
+        assert_eq!(payload(vec![Some(12.0), None]).ghost_gap(150), None);
     }
 }
 

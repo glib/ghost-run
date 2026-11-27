@@ -103,10 +103,19 @@ pub fn open(shared: &Shared) {
         shared,
         &mut subscriptions,
         "Video kinds folder",
-        "Your own kinds (*.toml, like the examples in Ghost Run's kinds folder), replacing the built-in ones with the same id. Not set: the built-in Trail and Speed progression.",
+        "Your own kinds (*.toml, like the examples in Ghost Run's kinds folder), replacing the built-in ones with the same id. Not set: the six built-in kinds.",
         |s| s.kinds_folder.clone(),
         |s, v| s.kinds_folder = v,
         ("Folder", &[]),
+    ));
+    files.add(&file_row(
+        shared,
+        &mut subscriptions,
+        "Brand kit",
+        "A brand.toml: title, end and chart cards and captions take its colours, fonts and logos. Not set: Ghost Run's own look.",
+        |s| s.brand_kit.clone(),
+        |s, v| s.brand_kit = v,
+        ("Brand kit", &["brand.toml", "*.toml"]),
     ));
     let import = adw::PreferencesGroup::new();
     import.set_title("Import");
