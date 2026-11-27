@@ -21,7 +21,7 @@ use timer_core::models::RunRecord;
 use timer_core::tracks;
 
 use crate::features::Outcome;
-use crate::organise::{Catalog, Flag, key, rides};
+use crate::organise::{Catalog, Flag, key};
 use crate::store::Clip;
 use crate::videos::{Card, CardKind, Item};
 
@@ -226,6 +226,8 @@ pub struct Sources<'a> {
     pub db: &'a TimerDatabase,
     pub clips: &'a [Clip],
     pub catalog: &'a Catalog,
+    /// Strava's activities, for captions' stats (`crate::strava`).
+    pub strava: Option<&'a crate::strava::Index>,
 }
 
 /// The video `kind` makes of `input` (the id of a run, course, collection,
@@ -388,8 +390,13 @@ fn day_of(clip: &Clip) -> String {
 /// A video of catalogued clips: a tag's, a collection's, a ride's or a
 /// feature's attempts, in the order recorded, rejects left out.
 fn plan_clips(kind: &Kind, input: &str, sources: Sources) -> Result<Plan> {
-    let Sources { db, clips, catalog } = sources;
-    let all_rides = rides(clips, &catalog.ride_names);
+    let Sources {
+        db,
+        clips,
+        catalog,
+        strava,
+    } = sources;
+    let all_rides = catalog.rides(clips);
     let feature = match kind.input {
         Input::Feature => Some(
             catalog
@@ -551,6 +558,28 @@ fn plan_clips(kind: &Kind, input: &str, sources: Sources) -> Result<Plan> {
                         (days.iter().position(|d| *d == day).unwrap_or(0) + 1).to_string(),
                     );
                     v.insert("outcome", outcome_of(clip).label().to_owned());
+                    let span = strava.and_then(|s| {
+                        let length = crate::videos::frames(clip) as f64
+                            / clip.info.as_ref().map_or(30.0, |i| i.fps().max(1.0));
+                        s.clip_span(clip, 0.0, length)
+                    });
+                    let stat = |f: &dyn Fn(&crate::strava::Span) -> Option<String>| {
+                        span.as_ref().and_then(f).unwrap_or_default()
+                    };
+                    v.insert(
+                        "distance",
+                        stat(&|s| Some(format!("{:.1} km in", s.distance_km?))),
+                    );
+                    v.insert(
+                        "top_speed",
+                        stat(&|s| Some(format!("{:.0} km/h top", s.top_kmh?))),
+                    );
+                    v.insert(
+                        "speed",
+                        stat(&|s| Some(format!("{:.0} km/h", s.average_kmh?))),
+                    );
+                    v.insert("hr", stat(&|s| Some(format!("{:.0} bpm", s.average_bpm?))));
+                    v.insert("climb", stat(&|s| Some(format!("{:.0} m up", s.climb_m?))));
                     v.insert("ride", ride.map(|r| r.title()).unwrap_or_default());
                     v.insert(
                         "course",
@@ -774,6 +803,7 @@ mod tests {
             db: &db,
             clips: &clips,
             catalog: &catalog,
+            strava: None,
         };
         let plan = plan(trail, "c", sources).unwrap();
         assert_eq!(plan.title, "Ridge");
@@ -806,6 +836,7 @@ mod tests {
             db: &db,
             clips: &clips,
             catalog: &catalog,
+            strava: None,
         };
         let plan = plan(kind, "ridge", sources).unwrap();
         assert_eq!(plan.title, "Ridge: getting faster");
@@ -874,6 +905,7 @@ mod tests {
             db: &db,
             clips: &clips,
             catalog: &catalog,
+            strava: None,
         };
         let kind = built_in()
             .into_iter()
@@ -930,6 +962,7 @@ mod tests {
             db: &db,
             clips: &clips,
             catalog: &catalog,
+            strava: None,
         };
         let kind = built_in().into_iter().find(|k| k.id == "story").unwrap();
         let plan = plan(&kind, "2", sources).unwrap();
@@ -973,6 +1006,7 @@ mod tests {
             db: &db,
             clips: &clips,
             catalog: &catalog,
+            strava: None,
         };
         let kind = |id: &str| built_in().into_iter().find(|k| k.id == id).unwrap();
         let review = plan(&kind("gear-review"), "gear: Fox helmet", sources).unwrap();
@@ -985,6 +1019,47 @@ mod tests {
         let ridelog = plan(&kind("ridelog"), "a.mp4.1", sources).unwrap();
         assert_eq!(ridelog.title, "Mon 1 Jun 2026, 10:00");
         assert_eq!(ridelog.items.len(), 4);
+        assert!(ridelog.items.iter().all(|i| i.caption.is_none()));
+
+        // With Strava: the ride from 9:50, at 5 m/s and 150 bpm.
+        let seconds: Vec<f64> = (0..7200).map(f64::from).collect();
+        let streams = crate::strava::Streams {
+            velocity: vec![5.0; seconds.len()],
+            heartrate: vec![150.0; seconds.len()],
+            altitude: seconds.iter().map(|t| t / 10.0).collect(),
+            distance: seconds.iter().map(|t| t * 5.0).collect(),
+            time: seconds,
+            latlng: Vec::new(),
+        };
+        let strava = crate::strava::Index {
+            activities: vec![crate::strava::Activity {
+                id: 7,
+                name: "Morning ride".into(),
+                sport: "MountainBikeRide".into(),
+                start_local: chrono::NaiveDate::from_ymd_opt(2026, 6, 1)
+                    .unwrap()
+                    .and_hms_opt(9, 50, 0)
+                    .unwrap(),
+                elapsed_seconds: 7200,
+                distance_m: 36_000.0,
+                climb_m: 720.0,
+            }],
+            streams: [(7, streams)].into(),
+            ..Default::default()
+        };
+        let ridelog = plan(
+            &kind("ridelog"),
+            "a.mp4.1",
+            Sources {
+                strava: Some(&strava),
+                ..sources
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            ridelog.items[1].caption.as_deref(),
+            Some("3.0 km in · 18 km/h top · 150 bpm")
+        );
     }
 
     #[test]

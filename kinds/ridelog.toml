@@ -18,6 +18,9 @@ seconds = 3
 type = "clips"
 # For the clips that are stored runs.
 timer = "optional"
+# From the Strava activity it was filmed in, when there is one; nothing
+# otherwise.
+caption = "{distance} · {top_speed} · {hr}"
 
 [[section]]
 type = "end"

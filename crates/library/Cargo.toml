@@ -17,6 +17,7 @@ serde_json.workspace = true
 timer-align = { path = "../timer-align" }
 timer-core = { path = "../timer-core" }
 toml = "0.9"
+ureq = { version = "2.12.1", features = ["json"] }
 walkdir = "2"
 
 [dev-dependencies]

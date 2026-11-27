@@ -158,6 +158,9 @@ struct State {
     thumbs: HashMap<PathBuf, PathBuf>,
     /// Asked for, not made yet.
     thumbs_asked: HashSet<PathBuf>,
+    /// Untimed clips whose Strava track passes a course's start: the
+    /// course's name and how far into the clip.
+    strava_hints: HashMap<PathBuf, (String, f64)>,
 }
 
 #[derive(Clone)]
@@ -429,6 +432,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             rides: Vec::new(),
             thumbs: HashMap::new(),
             thumbs_asked: HashSet::new(),
+            strava_hints: HashMap::new(),
         })),
         store: store.clone(),
         tx,
@@ -644,7 +648,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     match Library::open_default().and_then(|l| l.clips()) {
         Ok(clips) => {
             let mut s = page.state.borrow_mut();
-            s.rides = organise::rides(&clips, &s.catalog.ride_names);
+            s.rides = s.catalog.rides(&clips);
             s.clips = clips;
         }
         Err(e) => page
@@ -1128,11 +1132,12 @@ fn handle(p: &Page, reply: Reply) {
             let present: HashSet<&PathBuf> = clips.iter().map(|c| &c.path).collect();
             s.selected.retain(|path| present.contains(path));
             s.local_bytes = library::hydrate::local_bytes(&clips, &s.roots);
-            s.rides = organise::rides(&clips, &s.catalog.ride_names);
+            s.rides = s.catalog.rides(&clips);
             s.clips = clips;
             drop(s);
             fill_courses(p);
             refill(p);
+            crate::strava_ui::auto_sync(&p.shared);
         }
         Reply::Thumb(path, png) => {
             if let Some(picture) = p.pictures.borrow().get(&path)
@@ -1621,7 +1626,16 @@ fn cell(s: &State, clip: &Clip, column: usize) -> (String, Option<String>) {
                 }
                 None => match draft {
                     Some(d) => draft_text(s, d),
-                    None => (String::new(), None),
+                    None => match s.strava_hints.get(&clip.path) {
+                        Some((course, at)) => (
+                            format!("{course}?"),
+                            Some(format!(
+                                "Strava: this clip passes {course}'s start {} in",
+                                duration(*at)
+                            )),
+                        ),
+                        None => (String::new(), None),
+                    },
                 },
             }
         }
@@ -1710,7 +1724,7 @@ fn load_runs(p: &Page) {
     s.catalog = Library::open_default()
         .and_then(|l| l.catalog())
         .unwrap_or_default();
-    s.rides = organise::rides(&s.clips, &s.catalog.ride_names);
+    s.rides = s.catalog.rides(&s.clips);
     s.uses = Library::open_default()
         .and_then(|l| Ok(library::videos::clip_uses(&l.videos()?, &l.usage()?)))
         .unwrap_or_default();
@@ -1733,6 +1747,7 @@ fn load_runs(p: &Page) {
                 .iter()
                 .map(|c| (c.id.clone(), c.name.clone()))
                 .collect();
+            s.strava_hints = strava_hints(&s, &db);
         }
         Err(e) => s.runs_error = Some(format!("The run database couldn't be read: {e}")),
     }
@@ -1741,6 +1756,29 @@ fn load_runs(p: &Page) {
     {
         s.view = View::All;
     }
+}
+
+/// Untimed clips that pass a course's start, by their Strava tracks.
+fn strava_hints(s: &State, db: &timer_core::TimerDatabase) -> HashMap<PathBuf, (String, f64)> {
+    let Ok(library) = Library::open_default() else {
+        return HashMap::new();
+    };
+    let Ok(mut index) = library.strava_index() else {
+        return HashMap::new();
+    };
+    if index.activities.is_empty() {
+        return HashMap::new();
+    }
+    let courses = library::strava::learn(&mut index, db, &s.clips);
+    s.clips
+        .iter()
+        .filter(|c| !s.runs.contains_key(&run_key(&c.path)))
+        .filter_map(|c| {
+            let (course, at) = courses.near(&index, c)?;
+            let name = db.courses.iter().find(|k| k.id == course)?.name.clone();
+            Some((c.path.clone(), (name, at)))
+        })
+        .collect()
 }
 
 /// Each run by the name its clip would have ([`run_key`]), with its course,

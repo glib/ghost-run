@@ -13,6 +13,7 @@ mod runs_page;
 mod settings_dialog;
 mod shared;
 mod shell;
+mod strava_ui;
 mod time_page;
 mod tracks_view;
 mod ui;

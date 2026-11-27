@@ -1015,7 +1015,8 @@ fn new_video_dialog(p: &Page) {
             )
         })
         .collect();
-    let ride_choices: Vec<(String, String)> = library::organise::rides(&clips, &catalog.ride_names)
+    let ride_choices: Vec<(String, String)> = catalog
+        .rides(&clips)
         .into_iter()
         .map(|r| {
             (
@@ -1165,6 +1166,8 @@ fn new_video_dialog(p: &Page) {
                     .and_then(|(_, choices, pick, _)| choices.get(pick.selected() as usize))
                     .map(|(id, _)| id.clone())
                     .context("there's nothing to make it from yet")?;
+                let mut strava = library.strava_index()?;
+                library::strava::learn(&mut strava, &db, &library.clips()?);
                 let plan = library::kinds::plan(
                     k,
                     &input,
@@ -1172,6 +1175,7 @@ fn new_video_dialog(p: &Page) {
                         db: &db,
                         clips: &library.clips()?,
                         catalog: &library.catalog()?,
+                        strava: Some(&strava),
                     },
                 )?;
                 let id = library.new_video(

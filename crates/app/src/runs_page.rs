@@ -29,6 +29,8 @@ struct State {
     db: Option<TimerDatabase>,
     course: Option<String>,
     selected: HashSet<String>,
+    /// Course id → its Strava segment's line, when its runs match one.
+    segments: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -43,6 +45,7 @@ struct Page {
     /// Set while the course list is refilled, so its change signal is ignored.
     filling: Rc<std::cell::Cell<bool>>,
     summary: gtk::Label,
+    segment: gtk::Label,
     table_holder: gtk::ScrolledWindow,
     store: gio::ListStore,
     actions: gtk::Box,
@@ -99,6 +102,10 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let summary = label("", "heading");
     summary.set_wrap(true);
     main.append(&summary);
+    let segment = label("", "dim-label");
+    segment.set_wrap(true);
+    segment.set_visible(false);
+    main.append(&segment);
     let track = TrackView::new();
     main.append(&track.root);
 
@@ -155,6 +162,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             db: None,
             course: None,
             selected: HashSet::new(),
+            segments: Default::default(),
         })),
         banner,
         banner_text,
@@ -163,6 +171,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         track: track.clone(),
         filling: Rc::default(),
         summary,
+        segment,
         table_holder,
         store: gio::ListStore::new::<glib::BoxedAnyObject>(),
         actions,
@@ -231,7 +240,10 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             .file
             .as_ref()
             .is_some_and(DatabaseFile::unchanged);
-        if change == Change::Settings || (change == Change::Runs && stale) {
+        if change == Change::Settings
+            || change == Change::Strava
+            || (change == Change::Runs && stale)
+        {
             load(&p);
         }
     });
@@ -274,8 +286,62 @@ fn load(p: &Page) {
                 .map(|c| c.course.id.clone())
         });
     }
+    s.segments = s.db.as_ref().map(segment_lines).unwrap_or_default();
     drop(s);
     show(p);
+}
+
+/// Each course's Strava segment line: its name, the best and latest
+/// efforts.
+fn segment_lines(db: &TimerDatabase) -> std::collections::HashMap<String, String> {
+    let lines = || -> anyhow::Result<_> {
+        let library = library::Library::open_default()?;
+        let mut index = library.strava_index()?;
+        if index.activities.is_empty() {
+            return Ok(Default::default());
+        }
+        let courses = library::strava::learn(&mut index, db, &library.clips()?);
+        Ok(db
+            .courses
+            .iter()
+            .filter_map(|c| {
+                let (name, efforts) = courses.segment(&index, &c.id)?;
+                Some((c.id.clone(), segment_line(&name, &efforts)))
+            })
+            .collect())
+    };
+    lines().unwrap_or_default()
+}
+
+fn segment_line(name: &str, efforts: &[&library::strava::Effort]) -> String {
+    let best = efforts
+        .iter()
+        .min_by(|a, b| a.elapsed_seconds.total_cmp(&b.elapsed_seconds));
+    let mut parts = vec![format!("Strava segment “{name}”")];
+    if let Some(b) = best {
+        parts.push(format!(
+            "best {} ({})",
+            time(b.elapsed_seconds),
+            b.start_local.format("%-d %b %Y")
+        ));
+    }
+    if let Some(l) = efforts.last() {
+        parts.push(format!(
+            "latest {} ({})",
+            time(l.elapsed_seconds),
+            l.start_local.format("%-d %b %Y")
+        ));
+    }
+    parts.push(format!(
+        "{} {}",
+        efforts.len(),
+        if efforts.len() == 1 {
+            "effort"
+        } else {
+            "efforts"
+        }
+    ));
+    parts.join("  ·  ")
 }
 
 /// Fills everything from the state.
@@ -316,6 +382,9 @@ fn show(p: &Page) {
     };
     let board = course_board(course, &db.runs);
     p.summary.set_text(&summary(&board));
+    let segment = s.segments.get(&course.id);
+    p.segment.set_visible(segment.is_some());
+    p.segment.set_text(segment.map_or("", |l| l.as_str()));
     let target = library::Library::open_default()
         .and_then(|l| l.target(&course.id))
         .unwrap_or_default();
