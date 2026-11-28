@@ -554,5 +554,96 @@ class RelinkTests(unittest.TestCase):
         self.assertEqual(self.resolve.saved, 0)
 
 
+class FakeProjectManager:
+    """Projects in nested folders: {"name": project, "Folder/": {...}}."""
+
+    def __init__(self, tree, current):
+        self.tree = tree
+        self.path = []
+        self.current = current
+        self.saved = 0
+        self.pages = []
+
+    def here(self):
+        node = self.tree
+        for part in self.path:
+            node = node[part + "/"]
+        return node
+
+    def GetProjectListInCurrentFolder(self):
+        return [k for k in self.here() if not k.endswith("/")]
+
+    def GetFolderListInCurrentFolder(self):
+        return [k[:-1] for k in self.here() if k.endswith("/")]
+
+    def OpenFolder(self, name):
+        if name + "/" not in self.here():
+            return False
+        self.path.append(name)
+        return True
+
+    def GotoParentFolder(self):
+        self.path.pop()
+        return True
+
+    def GotoRootFolder(self):
+        self.path = []
+        return True
+
+    def LoadProject(self, name):
+        project = self.here().get(name)
+        if project is not None:
+            self.current = project
+        return project
+
+    def SaveProject(self):
+        self.saved += 1
+        return True
+
+    def GetCurrentProject(self):
+        return self.current
+
+    # The Resolve object, too.
+    def GetProjectManager(self):
+        return self
+
+    def OpenPage(self, page):
+        self.pages.append(page)
+        return True
+
+
+class OpenTests(unittest.TestCase):
+    def setUp(self):
+        self.open_now = FakeProject(FakeTimeline([[]], name="Main"), name="Whistler")
+        self.wanted = FakeProject(FakeTimeline([[]], name="Timeline 1"), name="Ridge laps")
+        self.wanted.others = [FakeTimeline([[]], name="YouTube")]
+        self.pm = FakeProjectManager(
+            {"Whistler": self.open_now, "2025/": {"Old/": {"Ridge laps": self.wanted}}},
+            self.open_now,
+        )
+
+    def open(self, **request):
+        return bridge.handle(dict(command="open", **request), lambda: self.pm)
+
+    def test_saves_the_open_project_then_opens_the_one_in_a_folder_at_its_timeline(self):
+        reply = self.open(project="Ridge laps", timeline="YouTube")
+        self.assertEqual(reply, {"ok": True, "project": "Ridge laps", "timeline": "YouTube",
+                                 "notes": []})
+        self.assertEqual(self.pm.saved, 1)
+        self.assertIs(self.pm.current, self.wanted)
+        self.assertEqual(self.pm.pages, ["edit"])
+
+    def test_the_project_already_open_is_kept_and_only_the_timeline_changes(self):
+        reply = self.open(project="Whistler", timeline="Nope")
+        self.assertTrue(reply["ok"])
+        self.assertEqual(reply["notes"], ["Whistler has no timeline called Nope"])
+        self.assertEqual(self.pm.saved, 0)
+
+    def test_a_project_not_there_is_refused_and_nothing_closed(self):
+        reply = self.open(project="Elsewhere")
+        self.assertEqual(reply["error"], "no_such_project")
+        self.assertIs(self.pm.current, self.open_now)
+
+
 if __name__ == "__main__":
     unittest.main()

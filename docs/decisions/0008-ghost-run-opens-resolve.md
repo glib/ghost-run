@@ -58,18 +58,24 @@ catalog is on (0007).
   project saved in the last 60 days and not a published video's, are kept,
   and the message names the projects. Without a shared catalog nothing
   changes.
-- **Hydrate and open** (next): from a timeline or video, copy its footage
-  down as a drawer job (one hydrate job, used by every place that copies
-  footage, #52), start Resolve if it isn't running, save the project that's
-  open, open the project and timeline (a new bridge command, `open`), and
-  relink old paths. Build in Resolve then opens the video's project if it has
-  one instead of making "Title 2".
+- **Hydrate and open:** a timeline or a linked video has Open in Resolve
+  (Copy footage and open in Resolve when some is on the NAS). From Resolve's
+  database it plans what to copy, as Bring back footage does, and asks with
+  the size; copies; starts Resolve if it isn't running (its scripting gets
+  three minutes to answer); saves the project open there; opens the project
+  (found in any project-manager folder) at the timeline on the Edit page (the
+  bridge's `open`); and relinks files whose paths have moved. It runs from the
+  Videos page like Bring back footage. Making every copy a drawer job is left
+  to #52. A linked video's Build in Resolve stays "Build again"; Open is the
+  main button.
 - **Every project Ghost Run makes is a video.** The Resolve ▾ menu's New
-  project… becomes New video…; Add to open timeline stays.
+  project… is now New video in Resolve…, and its project is recorded as a
+  video with what it used; Add to open timeline stays.
 - **The Python script goes** (0001's plan, PR 9): the Resolve script, its
   Fusion overlay, the Windows scripts and the parity check. `rtimer` stays.
-- **Machines check their footage root.** Settings warns when this machine's
-  local footage root isn't the path the shared catalog's other machines use.
+- **Machines with different footage roots** (the laptop's Resolve uses the
+  same project server) still work, as each open relinks to this machine's
+  paths. Doing better is #77.
 
 ## Consequences
 

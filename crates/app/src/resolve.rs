@@ -62,8 +62,18 @@ impl Bridge {
 
     /// The command that runs `script`.
     pub fn command(&self, script: &Path) -> Command {
-        let mut cmd = match &self.container {
-            None => Command::new(&self.python),
+        let mut cmd = self.in_place(&self.python);
+        cmd.arg(script);
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
+    /// `program` where Resolve is: here, or in its Distrobox.
+    fn in_place(&self, program: &str) -> Command {
+        match &self.container {
+            None => Command::new(program),
             Some(container) => {
                 // Inside another Distrobox (a dev box), go through the host.
                 let in_box = Path::new("/run/.containerenv").exists()
@@ -75,15 +85,10 @@ impl Bridge {
                 } else {
                     Command::new("distrobox")
                 };
-                cmd.args(["enter", "-n", container, "--", &self.python]);
+                cmd.args(["enter", "-n", container, "--", program]);
                 cmd
             }
-        };
-        cmd.arg(script);
-        for (k, v) in &self.env {
-            cmd.env(k, v);
         }
-        cmd
     }
 
     /// Sends `request`; the reply, or why there isn't one.
@@ -154,6 +159,56 @@ impl Bridge {
             }
             .into())
         }
+    }
+}
+
+/// Resolve's program, where it's installed (in its box, or here).
+const RESOLVE: &str = "/opt/resolve/bin/resolve";
+
+/// How long a starting Resolve gets before its scripting answers.
+const START_TIMEOUT: Duration = Duration::from_secs(180);
+
+impl Bridge {
+    /// The command that starts Resolve itself, in its box if it's in one.
+    pub fn launch_command(&self) -> Command {
+        let mut cmd = self.in_place(RESOLVE);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        cmd
+    }
+
+    /// Sends `request`; if Resolve isn't running, starts it (telling
+    /// `progress`), waits until its scripting answers, and sends it again.
+    pub fn request_starting(&self, request: &Value, progress: impl Fn(&str)) -> Result<Value> {
+        match self.request(request) {
+            Err(e)
+                if e.downcast_ref::<Refused>()
+                    .is_some_and(|r| r.code == "not_running") => {}
+            other => return other,
+        }
+        progress("Starting Resolve…");
+        self.launch_command()
+            .spawn()
+            .context("couldn't start Resolve")?;
+        let began = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(3));
+            match self.request(&serde_json::json!({"command": "status"})) {
+                Ok(_) => break,
+                Err(e)
+                    if e.downcast_ref::<Refused>().is_some_and(|r| r.code == "not_running")
+                        && began.elapsed() < START_TIMEOUT =>
+                {
+                    progress(&format!(
+                        "Starting Resolve… ({} s)",
+                        began.elapsed().as_secs()
+                    ));
+                }
+                Err(e) => return Err(e.context("Resolve was started but its scripting didn't answer (is External scripting set to Local?)")),
+            }
+        }
+        self.request(request)
     }
 }
 
@@ -236,6 +291,26 @@ mod tests {
         assert_eq!(
             direct.command(Path::new("/h/bridge.py")).get_program(),
             "python3"
+        );
+        assert_eq!(direct.launch_command().get_program(), RESOLVE);
+        let boxed = Bridge {
+            container: Some("davincibox".into()),
+            ..direct
+        };
+        let launch: Vec<String> = boxed
+            .launch_command()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            launch.ends_with(&[
+                "enter".into(),
+                "-n".into(),
+                "davincibox".into(),
+                "--".into(),
+                RESOLVE.into()
+            ]),
+            "{launch:?}"
         );
     }
 

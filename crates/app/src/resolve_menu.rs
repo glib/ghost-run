@@ -30,9 +30,9 @@ pub fn menu() -> ResolveMenu {
     to_timeline.set_tooltip_text(Some(
         "Put each overlay on the track above its clip in Resolve's current timeline, adding clips that aren't there yet at its end",
     ));
-    let to_project = gtk::Button::with_label("New project…");
+    let to_project = gtk::Button::with_label("New video in Resolve…");
     to_project.set_tooltip_text(Some(
-        "Start a Resolve project with these runs back to back: clips on V1, overlays on V2",
+        "Start a Resolve project with these runs back to back (clips on V1, overlays on V2), kept on the Videos page",
     ));
     for b in [&to_timeline, &to_project] {
         b.add_css_class("flat");

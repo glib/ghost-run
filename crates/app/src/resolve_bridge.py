@@ -553,7 +553,58 @@ def relink(resolve, request):
     return {"ok": True, "project": project.GetName(), "relinked": relinked, "notes": notes}
 
 
-COMMANDS = ("status", "add_overlays", "new_project", "read_timeline", "list_media", "relink")
+def goto_project(pm, name, depth=0):
+    """Moves the project manager into the folder holding the project `name`
+    (looking through subfolders, the first found); whether it was found."""
+    if name in (pm.GetProjectListInCurrentFolder() or []):
+        return True
+    if depth >= 8:
+        return False
+    for folder in pm.GetFolderListInCurrentFolder() or []:
+        if not pm.OpenFolder(folder):
+            continue
+        if goto_project(pm, name, depth + 1):
+            return True
+        pm.GotoParentFolder()
+    return False
+
+
+def open_project(resolve, request):
+    """Opens the project `project` (saving the one open first) and its
+    timeline `timeline`, on the Edit page."""
+    name = request.get("project")
+    if not name:
+        raise BridgeError("bad_request", "no project to open")
+    pm = resolve.GetProjectManager()
+    project = pm.GetCurrentProject()
+    if project is None or project.GetName() != name:
+        if project is not None:
+            pm.SaveProject()
+        pm.GotoRootFolder()
+        if not goto_project(pm, name):
+            raise BridgeError(
+                "no_such_project",
+                "Resolve has no project called %s in the database it has open." % name,
+            )
+        project = pm.LoadProject(name)
+        if not project:
+            raise BridgeError("load_failed", "Resolve couldn't open the project %s." % name)
+    notes = []
+    wanted = request.get("timeline")
+    if wanted:
+        timeline = find_timeline(project, wanted)
+        if timeline is None:
+            notes.append("%s has no timeline called %s" % (name, wanted))
+        else:
+            project.SetCurrentTimeline(timeline)
+    resolve.OpenPage("edit")
+    timeline = project.GetCurrentTimeline()
+    return {"ok": True, "project": project.GetName(),
+            "timeline": timeline.GetName() if timeline else None, "notes": notes}
+
+
+COMMANDS = ("status", "add_overlays", "new_project", "read_timeline", "list_media", "relink",
+            "open")
 
 
 def handle(request, resolve_factory=connect):
@@ -572,6 +623,8 @@ def handle(request, resolve_factory=connect):
             return list_media(resolve, request)
         if command == "relink":
             return relink(resolve, request)
+        if command == "open":
+            return open_project(resolve, request)
         return add_overlays(resolve, request.get("items", []))
     except BridgeError as e:
         return {"ok": False, "error": e.code, "message": e.message}

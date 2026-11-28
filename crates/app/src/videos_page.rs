@@ -68,6 +68,9 @@ struct Found {
     plan: library::relink::Plan,
     /// Free space where local copies go.
     free: Option<u64>,
+    /// Hydrate and open: open the project and timeline in Resolve (starting
+    /// it if need be) instead of working on the one open.
+    open: bool,
 }
 
 #[derive(Default)]
@@ -767,9 +770,33 @@ fn show(p: &Page) {
         free.connect_clicked(move |_| offer_to_free(&pp, local.clone(), String::new()));
         actions.append(&free);
     }
+    let open = (video.project.is_some()).then(|| {
+        let footage = row_of(&s, video.id).map(|r| r.footage.on_nas + r.footage.elsewhere);
+        let open = gtk::Button::with_label(if footage.unwrap_or(0) > 0 {
+            "Copy footage and open in Resolve"
+        } else {
+            "Open in Resolve"
+        });
+        open.add_css_class("suggested-action");
+        open.set_sensitive(!s.busy);
+        open.set_tooltip_text(Some(
+            "Copy what its timeline uses from the NAS, then open it in Resolve, starting Resolve if need be",
+        ));
+        open
+    });
     actions.append(&build);
+    if let Some(open) = &open {
+        build.remove_css_class("suggested-action");
+        actions.append(open);
+    }
     p.detail.append(&actions);
     drop(s);
+    if let Some(open) = open {
+        let (pp, project, timeline) = (p.clone(), video.project.clone(), video.timeline.clone());
+        open.connect_clicked(move |_| {
+            hydrate_and_open(&pp, project.clone().unwrap_or_default(), timeline.clone())
+        });
+    }
 
     let (pp, id) = (p.clone(), video.id);
     build.connect_clicked(move |_| pp.shared.build_video(id));
@@ -1134,6 +1161,87 @@ fn link_found(project: &str, timeline: &str, found: &[OnTimeline]) -> Result<(i6
     ))
 }
 
+/// Opens `project` at `timeline` in Resolve, starting Resolve if it isn't
+/// running (the project open there is saved first).
+fn open_in_resolve(
+    bridge: &crate::resolve::Bridge,
+    project: &str,
+    timeline: Option<&str>,
+    tx: &mpsc::Sender<Reply>,
+) -> Result<()> {
+    let _ = tx.send(Reply::Progress(format!("Opening {project} in Resolve…")));
+    let reply = bridge.request_starting(
+        &serde_json::json!({"command": "open", "project": project, "timeline": timeline}),
+        |line| {
+            let _ = tx.send(Reply::Progress(line.to_owned()));
+        },
+    )?;
+    if let Some(note) = reply["notes"].as_array().and_then(|n| n.first()) {
+        let _ = tx.send(Reply::Progress(
+            note.as_str().unwrap_or_default().to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Hydrate and open (decision 0008): copies the footage `timeline` in
+/// `project` uses here from the NAS (asking first, with the size), opens it
+/// in Resolve, and points Resolve at copies whose paths it doesn't know.
+/// Without Resolve's database it just opens it.
+fn hydrate_and_open(p: &Page, project: String, timeline: Option<String>) {
+    let files: Option<Vec<library::relink::PoolFile>> = {
+        let s = p.state.borrow();
+        s.resolve
+            .iter()
+            .flat_map(|r| &r.projects)
+            .filter(|pr| pr.name == project)
+            .flat_map(|pr| &pr.timelines)
+            .find(|t| Some(&t.name) == timeline.as_ref())
+            .map(|t| {
+                t.files()
+                    .into_iter()
+                    .map(|path| library::relink::PoolFile {
+                        path: path.to_owned(),
+                        online: path.is_file(),
+                        ..Default::default()
+                    })
+                    .collect()
+            })
+    };
+    let roots = crate::library_page::roots();
+    with_bridge(p, "Looking for its footage…", move |bridge, tx| {
+        let plan = match files {
+            Some(files) => match Library::open_default().and_then(|l| l.clips()) {
+                Ok(clips) => library::relink::plan(&clips, &roots, &files),
+                Err(e) => return Reply::Error(format!("Not opened: {e:#}")),
+            },
+            None => library::relink::Plan::default(),
+        };
+        let found = Found {
+            project,
+            timeline,
+            whole: false,
+            plan,
+            free: roots.local.as_deref().and_then(library::relink::free_bytes),
+            open: true,
+        };
+        if found.plan.steps.is_empty() {
+            // Nothing to copy or relink: open it now.
+            return match open_in_resolve(bridge, &found.project, found.timeline.as_deref(), tx) {
+                Ok(()) => Reply::Done(match found.plan.missing.len() {
+                    0 => format!("Opened {} in Resolve.", found.project),
+                    n => format!(
+                        "Opened {} in Resolve. {n} of its files aren't in the Library or here ({}).",
+                        found.project, found.plan.missing[0].0
+                    ),
+                }),
+                Err(e) => Reply::Error(format!("Not opened: {e:#}")),
+            };
+        }
+        Reply::Plan(Box::new(found))
+    });
+}
+
 /// Asks whether to bring back the open timeline's footage or the whole
 /// project's, then reads what it uses.
 fn bring_back_dialog(p: &Page) {
@@ -1200,6 +1308,7 @@ fn find_footage(
         whole,
         plan: library::relink::plan(&clips, roots, &files),
         free: roots.local.as_deref().and_then(library::relink::free_bytes),
+        open: false,
     })
 }
 
@@ -1278,17 +1387,31 @@ fn confirm_bring_back(p: &Page, found: Found) {
     }
     let n = plan.steps.len();
     let dialog = adw::AlertDialog::new(
-        Some(&if n == 0 {
-            "Nothing to bring back".to_owned()
-        } else {
-            format!("Bring back {n} {}?", if n == 1 { "clip" } else { "clips" })
+        Some(&match (n, found.open) {
+            (0, _) => "Nothing to bring back".to_owned(),
+            (_, true) => format!(
+                "Copy {n} {} here and open {}?",
+                if n == 1 { "clip" } else { "clips" },
+                found.timeline.as_deref().unwrap_or(&found.project)
+            ),
+            (_, false) => format!("Bring back {n} {}?", if n == 1 { "clip" } else { "clips" }),
         }),
         Some(&body),
     );
     if n == 0 {
         dialog.add_responses(&[("cancel", "Close")]);
     } else {
-        dialog.add_responses(&[("cancel", "Cancel"), ("go", "Copy and relink")]);
+        dialog.add_responses(&[
+            ("cancel", "Cancel"),
+            (
+                "go",
+                if found.open {
+                    "Copy and open"
+                } else {
+                    "Copy and relink"
+                },
+            ),
+        ]);
         dialog.set_response_appearance("go", adw::ResponseAppearance::Suggested);
         dialog.set_response_enabled("go", room);
     }
@@ -1305,9 +1428,15 @@ fn confirm_bring_back(p: &Page, found: Found) {
             whole: found.whole,
             plan: found.plan.clone(),
             free: found.free,
+            open: found.open,
         };
         let roots = crate::library_page::roots();
-        with_bridge(&p2, "Copying from the NAS…", move |bridge, tx| {
+        let doing = if found.plan.to_copy().next().is_some() {
+            "Copying from the NAS…"
+        } else {
+            "Opening it in Resolve…"
+        };
+        with_bridge(&p2, doing, move |bridge, tx| {
             let brought = bring_back(bridge, &roots, &found, tx);
             match brought {
                 Ok((Some(id), text)) => Reply::Linked(id, text),
@@ -1353,6 +1482,13 @@ fn bring_back(
             serde_json::json!({"path": step.old, "new": target, "proxy": proxy})
         })
         .collect();
+    if found.open {
+        open_in_resolve(bridge, &found.project, found.timeline.as_deref(), tx)?;
+        if files.is_empty() {
+            text.push(format!("Opened in Resolve: {}.", found.project));
+            return Ok((None, text.join(" ")));
+        }
+    }
     let _ = tx.send(Reply::Progress("Pointing Resolve at the files…".into()));
     let reply = bridge.request(&serde_json::json!({
         "command": "relink",
@@ -1375,7 +1511,7 @@ fn bring_back(
             found.plan.missing.len()
         ));
     }
-    if found.timeline.is_none() {
+    if found.timeline.is_none() || found.open {
         return Ok((None, text.join(" ")));
     }
     match link_timeline(bridge) {
@@ -1795,7 +1931,19 @@ fn show_timeline(p: &Page, row: &crate::resolve_projects::Row) {
         "Add it to Videos, with the clips it uses from the Library",
     ));
     actions.append(&make);
+    let open = gtk::Button::with_label(if f.on_nas + f.elsewhere > 0 {
+        "Copy footage and open in Resolve"
+    } else {
+        "Open in Resolve"
+    });
+    open.set_sensitive(!s.busy);
+    open.set_tooltip_text(Some(
+        "Copy what it uses from the NAS (you'll see how much first), then open it in Resolve, starting Resolve if need be",
+    ));
+    actions.prepend(&open);
     p.detail.append(&actions);
+    let (pp, project, timeline) = (p.clone(), row.project.clone(), row.timeline.clone());
+    open.connect_clicked(move |_| hydrate_and_open(&pp, project.clone(), Some(timeline.clone())));
     let found: Vec<OnTimeline> = s
         .resolve
         .iter()
