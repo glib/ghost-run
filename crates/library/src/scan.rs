@@ -109,17 +109,16 @@ pub fn scan(
     mut progress: impl FnMut(Progress),
 ) -> Result<ScanReport> {
     progress(Progress::Looking(0));
+    library.rekey()?;
     let mut paths = find(folders, cancel);
-    // While the NAS is offline, its clips stay as last catalogued.
-    let offline: Vec<Clip> = if roots.nas_online {
-        Vec::new()
-    } else {
-        library
-            .clips()?
-            .into_iter()
-            .filter(|c| roots.on_nas(&c.path))
-            .collect()
-    };
+    // While the NAS is offline, its clips stay as last catalogued. So do
+    // clips stored under a footage root this machine hasn't set (a shared
+    // catalog's, #69): it can't look for them.
+    let offline: Vec<Clip> = library
+        .clips()?
+        .into_iter()
+        .filter(|c| (!roots.nas_online && roots.on_nas(&c.path)) || c.path.is_relative())
+        .collect();
     // A local copy is listed as its original, when that's in the Library.
     let originals: HashSet<PathBuf> = paths
         .iter()
@@ -128,7 +127,7 @@ pub fn scan(
         .cloned()
         .collect();
     paths.retain(|p| roots.original_of(p).is_none_or(|o| !originals.contains(&o)));
-    for mut clip in offline.iter().cloned() {
+    for mut clip in offline.iter().filter(|c| roots.on_nas(&c.path)).cloned() {
         place(&mut clip, roots);
         library.upsert(&clip)?;
     }
@@ -150,7 +149,7 @@ pub fn scan(
             .map_or(0, |d| d.as_nanos() as i64);
         let known = library.get(path)?;
         let mut clip = match known {
-            Some(c) if c.size == meta.len() && c.modified_ns == modified_ns => c,
+            Some(c) if c.size == meta.len() && same_time(&c, modified_ns, roots) => c,
             _ => {
                 progress(Progress::Probing {
                     done: i,
@@ -187,6 +186,18 @@ pub fn scan(
     }
     Ok(report)
 }
+
+/// Whether a catalogued clip's modification time is still `modified_ns`. On
+/// the NAS, within [`NAS_TIME_SLACK_NS`]: machines sharing a catalog see the
+/// same file through their own mounts, which needn't agree to the
+/// nanosecond, and each would otherwise reprobe what the other wrote.
+fn same_time(clip: &Clip, modified_ns: i64, roots: &Roots) -> bool {
+    clip.modified_ns == modified_ns
+        || (roots.on_nas(&clip.path) && clip.modified_ns.abs_diff(modified_ns) < NAS_TIME_SLACK_NS)
+}
+
+/// See [`same_time`].
+pub const NAS_TIME_SLACK_NS: u64 = 2_000_000_000;
 
 /// Notes a clip's local copy, preview and proxy as they are on disk now.
 pub fn place(clip: &mut Clip, roots: &Roots) {
@@ -289,6 +300,77 @@ mod tests {
             .map(|p| p.strip_prefix(root).unwrap().display().to_string())
             .collect();
         assert_eq!(names, ["a/DJI_1.MP4", "a/DJI_2.MP4.mov", "b/GX010150.mp4"]);
+    }
+
+    #[test]
+    fn machines_sharing_a_catalog_keep_each_others_clips() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for f in ["nas/2026/DJI_1.MP4", "desk/DJI_2.MP4", "laptop/DJI_3.MP4"] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        // The laptop mounts the same share somewhere else.
+        std::os::unix::fs::symlink(root.join("nas"), root.join("mnt")).unwrap();
+        let roots = |nas: &str, local: &str| Roots {
+            nas: Some(root.join(nas)),
+            nas_online: true,
+            local: Some(root.join(local)),
+            catalog: root.join("catalog"),
+        };
+        let shared = root.join("library.sqlite3");
+        let open = |machine: &str, nas: &str| {
+            Library::open_with(
+                &shared,
+                &root.join(format!("{machine}.sqlite3")),
+                Some(root.join(nas)),
+                machine.into(),
+            )
+            .unwrap()
+        };
+        let desk = open("desk", "nas");
+        let laptop = open("laptop", "mnt");
+        let none = Cancel::default();
+        let first = scan(
+            &[root.join("nas"), root.join("desk")],
+            &roots("nas", "desk"),
+            &desk,
+            &none,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(first.probed, 2);
+        let second = scan(
+            &[root.join("mnt"), root.join("laptop")],
+            &roots("mnt", "laptop"),
+            &laptop,
+            &none,
+            |_| {},
+        )
+        .unwrap();
+        // The NAS clip was known already; nothing of the desk's went.
+        assert_eq!((second.probed, second.removed), (1, 0));
+        let names = |lib: &Library| -> Vec<String> {
+            let mut n: Vec<String> = lib
+                .clips()
+                .unwrap()
+                .iter()
+                .map(|c| c.path.strip_prefix(root).unwrap().display().to_string())
+                .collect();
+            n.sort();
+            n
+        };
+        assert_eq!(names(&desk), ["desk/DJI_2.MP4", "nas/2026/DJI_1.MP4"]);
+        assert_eq!(names(&laptop), ["laptop/DJI_3.MP4", "mnt/2026/DJI_1.MP4"]);
+
+        // A machine without the footage root set can't see the NAS clip, and
+        // doesn't forget it either.
+        let bare =
+            Library::open_with(&shared, &root.join("bare.sqlite3"), None, "bare".into()).unwrap();
+        let report = scan(&[], &Roots::default(), &bare, &none, |_| {}).unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(names(&desk).len(), 2);
     }
 
     #[test]

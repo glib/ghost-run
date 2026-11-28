@@ -1,8 +1,11 @@
 //! A daily copy of the catalog (the library database) and the run database
 //! on the NAS, in `<archive>/.ghost-run/backups/`: once footage lives only on
 //! the NAS, the catalog holds what can't be found again by rescanning (0005).
-//! One copy a day, the newest [`KEEP`] of each kind kept; only files this
-//! module names are ever removed.
+//! One copy a day per machine, named after it (`library-<machine>-<date>`,
+//! [`crate::machine::name`]), so machines sharing the share don't take each
+//! other's day (#69); the newest [`KEEP`] of each kind kept per machine. Only
+//! files this module names are ever removed (copies from before #69 have
+//! the date alone, and are pruned on their own).
 //!
 //! SQLite never writes to the share: its locks aren't reliable over SMB, and
 //! a `VACUUM INTO` straight onto a CIFS mount was seen to hang on a 0-byte
@@ -61,6 +64,7 @@ pub fn run(
         archive,
         today,
         staging,
+        &crate::machine::name(),
         SHARE_TIMEOUT,
     )
 }
@@ -71,6 +75,7 @@ fn run_with(
     archive: &Path,
     today: NaiveDate,
     staging: &Path,
+    machine: &str,
     timeout: Duration,
 ) -> Result<Report> {
     ensure!(
@@ -83,7 +88,7 @@ fn run_with(
     let mut report = Report::default();
     // (local file, name on the share)
     let mut copies: Vec<(PathBuf, String)> = Vec::new();
-    let library_name = format!("library-{today}.sqlite3");
+    let library_name = format!("library-{machine}-{today}.sqlite3");
     if !dir.join(&library_name).exists() {
         let staged = staging.join(&library_name);
         let made = std::fs::create_dir_all(staging)
@@ -98,7 +103,7 @@ fn run_with(
         }
     }
     if let Some(db) = run_database.filter(|p| p.is_file()) {
-        let name = format!("timer_db-{today}.yaml");
+        let name = format!("timer_db-{machine}-{today}.yaml");
         if !dir.join(&name).exists() {
             copies.push((db.to_owned(), name));
         }
@@ -138,10 +143,11 @@ fn run_with(
             }
         }
     }
-    let _ = std::fs::remove_file(staging.join(format!("library-{today}.sqlite3")));
+    let _ = std::fs::remove_file(staging.join(format!("library-{machine}-{today}.sqlite3")));
     if report.failed.is_empty() {
-        for (prefix, suffix) in [("library-", ".sqlite3"), ("timer_db-", ".yaml")] {
-            report.removed += prune(&dir, prefix, suffix)?;
+        for (kind, suffix) in [("library-", ".sqlite3"), ("timer_db-", ".yaml")] {
+            report.removed += prune(&dir, &format!("{kind}{machine}-"), suffix)?;
+            report.removed += prune(&dir, kind, suffix)?;
         }
         remove_partials(&dir)?;
     }
@@ -204,7 +210,9 @@ fn remove_partials(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes all but the newest [`KEEP`] `<prefix>YYYY-MM-DD<suffix>` files.
+/// Removes all but the newest [`KEEP`] `<prefix>YYYY-MM-DD<suffix>` files
+/// (another machine's `<kind><machine>-<date>` doesn't parse as a date after
+/// a shorter prefix, so it's never counted).
 fn prune(dir: &Path, prefix: &str, suffix: &str) -> Result<usize> {
     let mut dated: Vec<(NaiveDate, PathBuf)> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok())
@@ -230,6 +238,35 @@ mod tests {
         NaiveDate::from_ymd_opt(2026, 1, 1).unwrap() + chrono::Days::new(n as u64)
     }
 
+    fn backup(
+        library: &Library,
+        runs: Option<&Path>,
+        archive: &Path,
+        today: NaiveDate,
+        staging: &Path,
+        machine: &str,
+    ) -> Report {
+        run_with(
+            library,
+            runs,
+            archive,
+            today,
+            staging,
+            machine,
+            SHARE_TIMEOUT,
+        )
+        .unwrap()
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
     fn one_copy_a_day_and_the_newest_thirty_kept() {
         let d = tempfile::tempdir().unwrap();
@@ -240,29 +277,37 @@ mod tests {
         let runs = d.path().join("timer_db.yaml");
         std::fs::write(&runs, "schema_version: 2\n").unwrap();
 
-        let first = run(&library, Some(&runs), &archive, day(0), &staging).unwrap();
+        let first = backup(&library, Some(&runs), &archive, day(0), &staging, "desk");
         assert_eq!(first.written.len(), 2, "{:?}", first.failed);
-        // A copy opens as a library.
-        Library::open(&first.written[0]).unwrap();
+        // A copy is a library (read without opening it as one, which would
+        // put a machine file beside it).
+        let copy = rusqlite::Connection::open_with_flags(
+            &first.written[0],
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let version: u32 = copy
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(version >= 12);
+        drop(copy);
         assert_eq!(
             std::fs::read_to_string(&first.written[1]).unwrap(),
             "schema_version: 2\n"
         );
         // Only the two files reached the share (no SQLite journal or
         // temporary files), and nothing is left in staging.
-        let mut on_share: Vec<String> = std::fs::read_dir(folder(&archive))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        on_share.sort();
         assert_eq!(
-            on_share,
-            ["library-2026-01-01.sqlite3", "timer_db-2026-01-01.yaml"]
+            listing(&folder(&archive)),
+            [
+                "library-desk-2026-01-01.sqlite3",
+                "timer_db-desk-2026-01-01.yaml"
+            ]
         );
         assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
         // Again the same day: nothing new.
         assert_eq!(
-            run(&library, Some(&runs), &archive, day(0), &staging).unwrap(),
+            backup(&library, Some(&runs), &archive, day(0), &staging, "desk"),
             Report::default()
         );
 
@@ -272,18 +317,42 @@ mod tests {
         let leftover = folder(&archive).join(".library-2026-01-01.partial");
         std::fs::write(&leftover, "").unwrap();
         for n in 1..=31 {
-            run(&library, Some(&runs), &archive, day(n), &staging).unwrap();
+            backup(&library, Some(&runs), &archive, day(n), &staging, "desk");
         }
-        let mut names: Vec<String> = std::fs::read_dir(folder(&archive))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
+        let names = listing(&folder(&archive));
         assert_eq!(names.len(), 2 * KEEP + 1);
-        assert_eq!(names[0], "library-2026-01-03.sqlite3");
+        assert_eq!(names[0], "library-desk-2026-01-03.sqlite3");
         assert!(names.contains(&"notes.txt".to_owned()));
-        assert!(names.contains(&"timer_db-2026-02-01.yaml".to_owned()));
+        assert!(names.contains(&"timer_db-desk-2026-02-01.yaml".to_owned()));
         assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn each_machine_keeps_its_own_days() {
+        let d = tempfile::tempdir().unwrap();
+        let archive = d.path().join("nas");
+        let dir = folder(&archive);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = d.path().join("staging");
+        let library = Library::open(&d.path().join("library.sqlite3")).unwrap();
+        // Copies from before machines were named are pruned on their own.
+        for n in 0..(KEEP as i64 + 2) {
+            std::fs::write(dir.join(format!("library-{}.sqlite3", day(n))), "").unwrap();
+        }
+        // The laptop backs up first every day; the desk still gets its copy.
+        for n in 0..(KEEP as i64 + 5) {
+            for machine in ["laptop", "desk"] {
+                let r = backup(&library, None, &archive, day(n), &staging, machine);
+                assert_eq!(r.written.len(), 1, "{machine} day {n}: {:?}", r.failed);
+            }
+        }
+        let names = listing(&dir);
+        let count = |prefix: &str| names.iter().filter(|n| n.starts_with(prefix)).count();
+        assert_eq!(count("library-desk-"), KEEP);
+        assert_eq!(count("library-laptop-"), KEEP);
+        assert_eq!(names.len(), 3 * KEEP);
+        assert!(names.contains(&"library-desk-2026-02-04.sqlite3".to_owned()));
+        assert!(!names.contains(&"library-2026-01-01.sqlite3".to_owned()));
     }
 
     #[test]
@@ -297,10 +366,10 @@ mod tests {
         let library = Library::open(&d.path().join("library.sqlite3")).unwrap();
         let runs = d.path().join("timer_db.yaml");
         std::fs::write(&runs, "schema_version: 2\n").unwrap();
-        let report = run(&library, Some(&runs), &archive, day(0), &staging).unwrap();
+        let report = backup(&library, Some(&runs), &archive, day(0), &staging, "desk");
         assert_eq!(
             report.written,
-            [folder(&archive).join("timer_db-2026-01-01.yaml")]
+            [folder(&archive).join("timer_db-desk-2026-01-01.yaml")]
         );
         assert_eq!(report.failed.len(), 1);
         assert!(report.failed[0].starts_with("the library"));
