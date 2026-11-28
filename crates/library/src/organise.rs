@@ -11,7 +11,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::Result;
 use chrono::{Duration, NaiveDateTime};
-use rusqlite::{OptionalExtension, params};
 
 use crate::store::{Clip, Library};
 
@@ -205,37 +204,34 @@ impl Library {
 
     pub fn catalog(&self) -> Result<Catalog> {
         let mut c = Catalog::default();
-        let mut stmt = self.db.prepare("SELECT clip, tag FROM clip_tags")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
-            let (clip, tag) = row?;
-            c.tags.entry(clip).or_default().insert(tag);
+        for r in self.db.query("SELECT clip, tag FROM clip_tags", &[])? {
+            c.tags.entry(r.get(0)?).or_default().insert(r.get(1)?);
         }
-        let mut stmt = self.db.prepare("SELECT clip, flag FROM clip_flags")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-            let (clip, flag) = row?;
-            if let Some(flag) = Flag::parse(&flag) {
-                c.flags.insert(clip, flag);
+        for r in self.db.query("SELECT clip, flag FROM clip_flags", &[])? {
+            if let Some(flag) = Flag::parse(&r.get::<String>(1)?) {
+                c.flags.insert(r.get(0)?, flag);
             }
         }
-        let mut stmt = self
+        let mut members: HashMap<i64, HashSet<String>> = HashMap::new();
+        for r in self
             .db
-            .prepare("SELECT id, name FROM collections ORDER BY name COLLATE NOCASE")?;
-        let collections = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, name) in collections {
-            let mut stmt = self
-                .db
-                .prepare("SELECT clip FROM collection_clips WHERE collection = ?1")?;
-            let clips = stmt
-                .query_map([id], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<HashSet<_>>>()?;
-            c.collections.push(Collection { id, name, clips });
+            .query("SELECT collection, clip FROM collection_clips", &[])?
+        {
+            members.entry(r.get(0)?).or_default().insert(r.get(1)?);
         }
-        let mut stmt = self.db.prepare("SELECT clip, name FROM ride_names")?;
-        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
-            let (clip, name) = row?;
-            c.ride_names.insert(clip, name);
+        for r in self.db.query(
+            "SELECT id, name FROM collections ORDER BY lower(name), name",
+            &[],
+        )? {
+            let id: i64 = r.get(0)?;
+            c.collections.push(Collection {
+                id,
+                name: r.get(1)?,
+                clips: members.remove(&id).unwrap_or_default(),
+            });
+        }
+        for r in self.db.query("SELECT clip, name FROM ride_names", &[])? {
+            c.ride_names.insert(r.get(0)?, r.get(1)?);
         }
         c.features = self.features()?;
         let activities = self.strava_activities()?;
@@ -253,18 +249,21 @@ impl Library {
 
     /// Flags these clips, or clears their flag.
     pub fn set_flag(&self, clips: &[String], flag: Option<Flag>) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            match flag {
-                Some(f) => tx.execute(
-                    "INSERT OR REPLACE INTO clip_flags VALUES (?1, ?2)",
-                    params![clip, f.text()],
-                )?,
-                None => tx.execute("DELETE FROM clip_flags WHERE clip = ?1", [clip])?,
-            };
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                match flag {
+                    Some(f) => self.db.execute(
+                        "INSERT INTO clip_flags (clip, flag) VALUES ($1, $2)
+                         ON CONFLICT (clip) DO UPDATE SET flag = excluded.flag",
+                        &[clip, &f.text()],
+                    )?,
+                    None => self
+                        .db
+                        .execute("DELETE FROM clip_flags WHERE clip = $1", &[clip])?,
+                };
+            }
+            Ok(())
+        })
     }
 
     pub fn add_tag(&self, clips: &[String], tag: &str) -> Result<()> {
@@ -272,106 +271,106 @@ impl Library {
         if tag.is_empty() {
             return Ok(());
         }
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute(
-                "INSERT OR IGNORE INTO clip_tags VALUES (?1, ?2)",
-                params![clip, tag],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db.execute(
+                    "INSERT INTO clip_tags (clip, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                    &[clip, &tag],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     pub fn remove_tag(&self, clips: &[String], tag: &str) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute(
-                "DELETE FROM clip_tags WHERE clip = ?1 AND tag = ?2",
-                params![clip, tag],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db.execute(
+                    "DELETE FROM clip_tags WHERE clip = $1 AND tag = $2",
+                    &[clip, &tag],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// The collection called `name` (any case), made if there's none.
     pub fn collection(&self, name: &str) -> Result<i64> {
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "a collection needs a name");
-        let found: Option<i64> = self
-            .db
-            .query_row(
-                "SELECT id FROM collections WHERE name = ?1 COLLATE NOCASE",
-                [name],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = found {
-            return Ok(id);
+        if let Some(r) = self.db.query_opt(
+            "SELECT id FROM collections WHERE lower(name) = lower($1) ORDER BY id",
+            &[&name],
+        )? {
+            return r.get(0);
         }
-        self.db
-            .execute("INSERT INTO collections (name) VALUES (?1)", [name])?;
-        Ok(self.db.last_insert_rowid())
+        self.db.query_one(
+            "INSERT INTO collections (name) VALUES ($1) RETURNING id",
+            &[&name],
+        )
     }
 
     pub fn rename_collection(&self, id: i64, name: &str) -> Result<()> {
         let name = name.trim();
         anyhow::ensure!(!name.is_empty(), "a collection needs a name");
         self.db.execute(
-            "UPDATE collections SET name = ?2 WHERE id = ?1",
-            params![id, name],
+            "UPDATE collections SET name = $2 WHERE id = $1",
+            &[&id, &name],
         )?;
         Ok(())
     }
 
     pub fn delete_collection(&self, id: i64) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM collection_clips WHERE collection = ?1", [id])?;
-        tx.execute("DELETE FROM collections WHERE id = ?1", [id])?;
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            self.db
+                .execute("DELETE FROM collection_clips WHERE collection = $1", &[&id])?;
+            self.db
+                .execute("DELETE FROM collections WHERE id = $1", &[&id])?;
+            Ok(())
+        })
     }
 
     pub fn add_to_collection(&self, id: i64, clips: &[String]) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute(
-                "INSERT OR IGNORE INTO collection_clips VALUES (?1, ?2)",
-                params![id, clip],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db.execute(
+                    "INSERT INTO collection_clips (collection, clip) VALUES ($1, $2)
+                     ON CONFLICT DO NOTHING",
+                    &[&id, clip],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     pub fn remove_from_collection(&self, id: i64, clips: &[String]) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute(
-                "DELETE FROM collection_clips WHERE collection = ?1 AND clip = ?2",
-                params![id, clip],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db.execute(
+                    "DELETE FROM collection_clips WHERE collection = $1 AND clip = $2",
+                    &[&id, clip],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Names the ride made of these clips (an empty name clears it). The name
     /// is kept on its first clip only.
     pub fn name_ride(&self, ride: &Ride, name: &str) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in &ride.clips {
-            tx.execute("DELETE FROM ride_names WHERE clip = ?1", [clip])?;
-        }
-        if !name.trim().is_empty() {
-            tx.execute(
-                "INSERT INTO ride_names VALUES (?1, ?2)",
-                params![ride.clips[0], name.trim()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in &ride.clips {
+                self.db
+                    .execute("DELETE FROM ride_names WHERE clip = $1", &[clip])?;
+            }
+            if !name.trim().is_empty() {
+                self.db.execute(
+                    "INSERT INTO ride_names (clip, name) VALUES ($1, $2)",
+                    &[&ride.clips[0], &name.trim()],
+                )?;
+            }
+            Ok(())
+        })
     }
 }
 

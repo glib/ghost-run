@@ -48,11 +48,13 @@ verified on the NAS.
 
 ## Before anything moves
 
-- Copy the run database (`run_database`) and
-  `~/.local/share/ghost-run/library.sqlite3` to
+- Copy the run database (`run_database`),
+  `~/.local/share/ghost-run/library.sqlite3` and
+  `~/.local/share/ghost-run/library.machine.sqlite3` to
   `<share folder>/.ghost-run/tidy-backup-<date>/`.
 - Ask Liam to commit any markers still in draft in Ghost Run, since drafts are
-  keyed by the clip's local path.
+  keyed by the clip's path (its path in the footage root, for clips on the
+  NAS), which a move changes.
 - Note that Resolve projects pointing at files that move will need relinking
   (Resolve's Relink Media finds them by name). Tell Liam this up front.
 
