@@ -503,6 +503,8 @@ fn handle(p: &Page, reply: Reply) {
                     p.resolve_status.set_text(&text);
                 }
             }
+            // A new project is a new video.
+            p.shared.videos_changed();
             show(p);
         }
     }
@@ -963,6 +965,9 @@ fn create_project(
     let clips = library.clips()?;
     let mut runs = Vec::new();
     let mut format = None;
+    // Each run's clip as a video item (decision 0008: every project Ghost
+    // Run makes is a video).
+    let mut items_made = Vec::new();
     for (run_id, clip, overlay) in items {
         let first_frame = library
             .rendered(run_id)?
@@ -979,6 +984,14 @@ fn create_project(
                 None => library::probe::probe(clip)?,
             };
             format = Some(info);
+        }
+        if let Some(c) = known {
+            items_made.push(library::videos::Item {
+                first_frame,
+                frames,
+                timer: Some(run_id.clone()),
+                ..library::videos::Item::whole(c)
+            });
         }
         let (clip, proxy) = ensure_local(&library, &clips, clip)?;
         runs.push(serde_json::json!({
@@ -1001,7 +1014,42 @@ fn create_project(
         "height": height,
         "runs": runs,
     }))?;
-    Ok(describe_project(&reply, ("run", "runs")))
+    let mut text = describe_project(&reply, ("run", "runs"));
+    match record_video(&library, name, &reply, &items_made) {
+        Ok(()) => text.push_str(" It's on the Videos page."),
+        Err(e) => text.push_str(&format!(" It wasn't added to Videos: {e:#}")),
+    }
+    Ok(text)
+}
+
+/// Adds the project `reply` says was made to the catalog as a video in
+/// Resolve, with `items`, recorded as what it used.
+fn record_video(
+    library: &Library,
+    name: &str,
+    reply: &serde_json::Value,
+    items: &[library::videos::Item],
+) -> anyhow::Result<()> {
+    use library::videos::{Status, Use};
+    let id = library.new_video(name, "clips")?;
+    let mut video = library
+        .video(id)?
+        .ok_or_else(|| anyhow::anyhow!("the new video went missing"))?;
+    video.project = reply["project"].as_str().map(str::to_owned);
+    video.timeline = reply["timeline"].as_str().map(str::to_owned);
+    video.status = Status::InResolve;
+    library.save_video(&video)?;
+    library.set_items(id, items)?;
+    let uses: Vec<Use> = items
+        .iter()
+        .map(|i| Use {
+            video: id,
+            clip: i.clip.clone(),
+            first_frame: i.first_frame,
+            frames: i.frames,
+        })
+        .collect();
+    library.set_usage(id, "built", &uses)
 }
 
 /// The file Resolve should use for a clip, and its proxy: for an original on
