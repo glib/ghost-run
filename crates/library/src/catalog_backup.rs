@@ -89,7 +89,8 @@ fn run_with(
     // (local file, name on the share)
     let mut copies: Vec<(PathBuf, String)> = Vec::new();
     let library_name = format!("library-{machine}-{today}.sqlite3");
-    if !dir.join(&library_name).exists() {
+    // A shared catalog is backed up where it's kept (#69), not by each machine.
+    if !library.is_shared() && !dir.join(&library_name).exists() {
         let staged = staging.join(&library_name);
         let made = std::fs::create_dir_all(staging)
             .with_context(|| format!("creating {}", staging.display()))

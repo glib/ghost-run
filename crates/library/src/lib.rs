@@ -40,6 +40,7 @@ pub mod proxy;
 pub mod relink;
 pub mod scan;
 pub mod settings;
+pub mod shared;
 pub mod store;
 pub mod strava;
 pub mod thumbs;

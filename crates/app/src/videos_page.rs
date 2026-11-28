@@ -209,7 +209,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     shared.subscribe(move |change| match change {
         // After the widget that saved is done (it's rebuilt).
-        Change::Videos | Change::Runs | Change::Settings => {
+        Change::Videos | Change::Runs | Change::Settings | Change::Catalog => {
             let p = p.clone();
             gtk::glib::idle_add_local_once(move || load(&p));
         }

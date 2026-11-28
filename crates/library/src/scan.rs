@@ -148,6 +148,11 @@ pub fn scan(
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_nanos() as i64);
         let known = library.get(path)?;
+        // A read-only catalog (a shared one out of reach) can't take new
+        // clips; the ones it has still get this machine's part updated.
+        if known.is_none() && library.read_only().is_some() {
+            continue;
+        }
         let mut clip = match known {
             Some(c) if c.size == meta.len() && same_time(&c, modified_ns, roots) => c,
             _ => {

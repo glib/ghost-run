@@ -13,8 +13,11 @@ track, render overlays and hand them to DaVinci Resolve. Today the app has:
   whether its original is verified on the NAS (**Not on the NAS** lists the
   ones that aren't). Once a day it also copies its catalog and the run
   database to the NAS (`.ghost-run/backups/` in Import's archive folder,
-  the last 30 days kept) (settings are under the gear in
-  the sidebar). **Make missing proxies** writes a
+  named after the machine, the last 30 days of each kept) (settings are under
+  the gear in the sidebar). With **Settings > Shared catalog** the desktop and
+  the laptop use one catalog in Postgres (a `ghost_run` database made by
+  `scripts/catalog-db-setup.sh` on the server); away from it, each opens its
+  last copy read-only. **Make missing proxies** writes a
   half-size ProRes Proxy copy of each clip into a `Proxy` folder beside it, which
   Resolve picks up as proxy media and the Time page steps through. Double-click
   a clip (or tick it and press **Time it**) to time it.
