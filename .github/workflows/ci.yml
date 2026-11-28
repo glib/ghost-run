@@ -23,16 +23,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.10 is the oldest Python the Resolve install supports; 3.13 is current.
+        # The Resolve bridge runs in Resolve's Python: 3.10 is the oldest a
+        # Resolve install has; 3.13 is current. Stdlib only, like the scripts.
         python: ["3.10", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: requirements-resolve.txt
-      - run: python -m pip install -r requirements-resolve.txt
       - run: python -m unittest discover -s tests -v
 
   rust:
@@ -105,22 +103,6 @@ jobs:
           REQUIRE_POSTGRES: "1"
           GHOST_RUN_TEST_POSTGRES: host=localhost port=5432 user=postgres password=postgres
 
-  parity:
-    name: Python/Rust parity
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-          cache: pip
-          cache-dependency-path: requirements-resolve.txt
-      - run: python -m pip install -r requirements-resolve.txt
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --locked -p timer-cli
-      - run: scripts/parity.sh
-
   # Releases (docs/releasing.md): after the checks pass on main, the commits
   # since the last vX.Y.Z tag pick the next version (scripts/release.py). If
   # there is one, it's built in the Fedora the app's distrobox runs, so the
@@ -129,7 +111,7 @@ jobs:
   version:
     name: Next version
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [python, rust, parity]
+    needs: [python, rust]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.next.outputs.version }}

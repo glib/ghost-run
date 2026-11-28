@@ -1,0 +1,2077 @@
+### examples/timer_db.yaml courses
+lower_whistler_a_line	Lower Whistler A-Line	4 sectors
+exit 0
+### examples/timer_db.yaml runs
+run_2026_05_31_001	lower_whistler_a_line	2026-05-31	committed	GX010123.MP4
+exit 0
+### examples/timer_db.yaml validate-db
+Database OK
+exit 0
+### examples/timer_db.yaml stats --course does-not-exist
+Error: course not found: does-not-exist
+exit 1
+### examples/timer_db.yaml runs --course lower_whistler_a_line
+run_2026_05_31_001	lower_whistler_a_line	2026-05-31	committed	GX010123.MP4
+exit 0
+### examples/timer_db.yaml stats --course lower_whistler_a_line
+Course: Lower Whistler A-Line
+Eligible runs: 1
+Best: 0:10.010 (run_2026_05_31_001)
+Optimal: 0:10.010
+exit 0
+### examples/timer_db.yaml stats --course lower_whistler_a_line --json
+{
+  "best_lap": {
+    "frames": 600,
+    "run_id": "run_2026_05_31_001",
+    "seconds": 10.01001001001001
+  },
+  "course_id": "lower_whistler_a_line",
+  "eligible_run_count": 1,
+  "fastest_sectors": [
+    {
+      "frames": 120,
+      "run_id": "run_2026_05_31_001",
+      "seconds": 2.002002002002002,
+      "sector": 1
+    },
+    {
+      "frames": 140,
+      "run_id": "run_2026_05_31_001",
+      "seconds": 2.335669002335669,
+      "sector": 2
+    },
+    {
+      "frames": 155,
+      "run_id": "run_2026_05_31_001",
+      "seconds": 2.5859192525859194,
+      "sector": 3
+    },
+    {
+      "frames": 185,
+      "run_id": "run_2026_05_31_001",
+      "seconds": 3.0864197530864197,
+      "sector": 4
+    }
+  ],
+  "optimal": {
+    "frames": 600,
+    "seconds": 10.01001001001001
+  }
+}
+exit 0
+### work/timer_db.yaml normalize-db
+Updated 0 run fingerprints
+exit 0
+### written timer_db.yaml
+schema_version: 2
+courses:
+- id: lower_whistler_a_line
+  name: Lower Whistler A-Line
+  sector_count: 4
+runs:
+- id: run_2026_05_31_001
+  course_id: lower_whistler_a_line
+  date: '2026-05-31'
+  filename: GX010123.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 700
+    S1: 220
+    S2: 360
+    S3: 515
+    Start: 100
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: GX010123.MP4:129979c14aa405e2
+### work/timer_db.yaml runs
+run_2026_05_31_001	lower_whistler_a_line	2026-05-31	committed	GX010123.MP4
+exit 0
+### tests/fixtures/parity_db.yaml courses
+pingu	Pingu	3 sectors
+on_course	On	1 sectors
+cafe	Café Run 🚵	2 sectors
+rounding	Half-even rounding	1 sectors
+empty	Empty Course	2 sectors
+exit 0
+### tests/fixtures/parity_db.yaml runs
+cafe1	cafe	2026-06-07	committed	GX01 Café.MP4
+on1	on_course	2026-06-06	committed	yes
+p7	pingu	2026-05-20	committed	GX010700.MP4
+p1	pingu	2026-06-01	committed	DJI_20260601100000_0001_D.MP4
+p2	pingu	2026-06-02	committed	GX010200.MP4
+p3	pingu	2026-06-03	committed	GX010300.MP4
+p4_ignored	pingu	2026-06-04	committed,ignored	GX010400.MP4
+p5_uncommitted	pingu	2026-06-04	uncommitted	GX010500.MP4
+p6_invalid	pingu	2026-06-05	committed	GX010600.MP4
+round1	rounding	2026-06-08	committed	GX010800.MP4
+exit 0
+### tests/fixtures/parity_db.yaml validate-db
+run p6_invalid: missing marker S2
+exit 1
+### tests/fixtures/parity_db.yaml stats --course does-not-exist
+Error: course not found: does-not-exist
+exit 1
+### tests/fixtures/parity_db.yaml runs --course pingu
+p7	pingu	2026-05-20	committed	GX010700.MP4
+p1	pingu	2026-06-01	committed	DJI_20260601100000_0001_D.MP4
+p2	pingu	2026-06-02	committed	GX010200.MP4
+p3	pingu	2026-06-03	committed	GX010300.MP4
+p4_ignored	pingu	2026-06-04	committed,ignored	GX010400.MP4
+p5_uncommitted	pingu	2026-06-04	uncommitted	GX010500.MP4
+p6_invalid	pingu	2026-06-05	committed	GX010600.MP4
+exit 0
+### tests/fixtures/parity_db.yaml stats --course pingu
+Course: Pingu
+Eligible runs: 4
+Best: 1:23.417 (p1)
+Optimal: 1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml stats --course pingu --json
+{
+  "best_lap": {
+    "frames": 5000,
+    "run_id": "p1",
+    "seconds": 83.41675008341676
+  },
+  "course_id": "pingu",
+  "eligible_run_count": 4,
+  "fastest_sectors": [
+    {
+      "frames": 390,
+      "run_id": "p7",
+      "seconds": 15.6,
+      "sector": 1
+    },
+    {
+      "frames": 780,
+      "run_id": "p2",
+      "seconds": 26.026026026026027,
+      "sector": 2
+    },
+    {
+      "frames": 2000,
+      "run_id": "p1",
+      "seconds": 33.366700033366705,
+      "sector": 3
+    }
+  ],
+  "optimal": {
+    "frames": 3170,
+    "seconds": 74.99272605939274
+  }
+}
+exit 0
+### tests/fixtures/parity_db.yaml runs --course on_course
+on1	on_course	2026-06-06	committed	yes
+exit 0
+### tests/fixtures/parity_db.yaml stats --course on_course
+Course: On
+Eligible runs: 1
+Best: 0:30.000 (on1)
+Optimal: 0:30.000
+exit 0
+### tests/fixtures/parity_db.yaml stats --course on_course --json
+{
+  "best_lap": {
+    "frames": 900,
+    "run_id": "on1",
+    "seconds": 30.0
+  },
+  "course_id": "on_course",
+  "eligible_run_count": 1,
+  "fastest_sectors": [
+    {
+      "frames": 900,
+      "run_id": "on1",
+      "seconds": 30.0,
+      "sector": 1
+    }
+  ],
+  "optimal": {
+    "frames": 900,
+    "seconds": 30.0
+  }
+}
+exit 0
+### tests/fixtures/parity_db.yaml runs --course cafe
+cafe1	cafe	2026-06-07	committed	GX01 Café.MP4
+exit 0
+### tests/fixtures/parity_db.yaml stats --course cafe
+Course: Café Run 🚵
+Eligible runs: 1
+Best: 0:50.092 (cafe1)
+Optimal: 0:50.092
+exit 0
+### tests/fixtures/parity_db.yaml stats --course cafe --json
+{
+  "best_lap": {
+    "frames": 1201,
+    "run_id": "cafe1",
+    "seconds": 50.09175842509176
+  },
+  "course_id": "cafe",
+  "eligible_run_count": 1,
+  "fastest_sectors": [
+    {
+      "frames": 500,
+      "run_id": "cafe1",
+      "seconds": 20.85418752085419,
+      "sector": 1
+    },
+    {
+      "frames": 701,
+      "run_id": "cafe1",
+      "seconds": 29.23757090423757,
+      "sector": 2
+    }
+  ],
+  "optimal": {
+    "frames": 1201,
+    "seconds": 50.09175842509176
+  }
+}
+exit 0
+### tests/fixtures/parity_db.yaml runs --course rounding
+round1	rounding	2026-06-08	committed	GX010800.MP4
+exit 0
+### tests/fixtures/parity_db.yaml stats --course rounding
+Course: Half-even rounding
+Eligible runs: 1
+Best: 0:00.062 (round1)
+Optimal: 0:00.062
+exit 0
+### tests/fixtures/parity_db.yaml stats --course rounding --json
+{
+  "best_lap": {
+    "frames": 1,
+    "run_id": "round1",
+    "seconds": 0.0625
+  },
+  "course_id": "rounding",
+  "eligible_run_count": 1,
+  "fastest_sectors": [
+    {
+      "frames": 1,
+      "run_id": "round1",
+      "seconds": 0.0625,
+      "sector": 1
+    }
+  ],
+  "optimal": {
+    "frames": 1,
+    "seconds": 0.0625
+  }
+}
+exit 0
+### tests/fixtures/parity_db.yaml runs --course empty
+
+exit 0
+### tests/fixtures/parity_db.yaml stats --course empty
+Course: Empty Course
+Eligible runs: 0
+Best: --:--.---
+Optimal: --:--.---
+exit 0
+### tests/fixtures/parity_db.yaml stats --course empty --json
+{
+  "best_lap": null,
+  "course_id": "empty",
+  "eligible_run_count": 0,
+  "fastest_sectors": [],
+  "optimal": null
+}
+exit 0
+### work/parity_db.yaml normalize-db
+Updated 10 run fingerprints
+exit 0
+### written parity_db.yaml
+schema_version: 2
+courses:
+- id: pingu
+  name: Pingu
+  sector_count: 3
+- id: on_course
+  name: 'On'
+  sector_count: 1
+- id: cafe
+  name: "Caf\xE9 Run \U0001F6B5"
+  sector_count: 2
+- id: rounding
+  name: Half-even rounding
+  sector_count: 1
+- id: empty
+  name: Empty Course
+  sector_count: 2
+runs:
+- id: p1
+  course_id: pingu
+  date: '2026-06-01'
+  filename: DJI_20260601100000_0001_D.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 5100
+    S1: 1300
+    S2: 3100
+    Start: 100
+  capture_time: '2026-06-01T17:00:00Z'
+  capture_time_source: filename_timestamp
+  fingerprint: DJI_20260601100000_0001_D.MP4:2950c494be96d4a3
+- id: p2
+  course_id: pingu
+  date: '2026-06-02'
+  filename: GX010200.MP4
+  source_fps: 29.97
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 2600
+    S1: 670
+    S2: 1450
+    Start: 50
+  capture_time: '2026-06-02T17:00:00Z'
+  capture_time_source: manual
+  fingerprint: GX010200.MP4:701a5a9649a61fac
+- id: p3
+  course_id: pingu
+  date: '2026-06-03'
+  filename: GX010300.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 5000
+    S1: 1150
+    S2: 3000
+    Start: 0
+  capture_time: '2026-06-03T09:30:00Z'
+  fingerprint: GX010300.MP4:7bf1ed3f37c86e49
+- id: p4_ignored
+  course_id: pingu
+  date: '2026-06-04'
+  filename: GX010400.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: true
+  marker_frames:
+    Finish: 30
+    S1: 10
+    S2: 20
+    Start: 0
+  capture_time: '2026-06-04T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: GX010400.MP4:f6436566350c8d8f
+- id: p5_uncommitted
+  course_id: pingu
+  date: '2026-06-04'
+  filename: GX010500.MP4
+  source_fps: 59.94
+  committed: false
+  ignored: false
+  marker_frames:
+    Finish: 30
+    S1: 10
+    S2: 20
+    Start: 0
+  capture_time: '2026-06-04T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: GX010500.MP4:f6436566350c8d8f
+- id: p6_invalid
+  course_id: pingu
+  date: '2026-06-05'
+  filename: GX010600.MP4
+  source_fps: 59.94
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 30
+    S1: 10
+    Start: 0
+  capture_time: '2026-06-05T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: GX010600.MP4:81c2a233cd95e8f8
+- id: p7
+  course_id: pingu
+  date: '2026-05-20'
+  filename: GX010700.MP4
+  source_fps: 25.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 2300
+    S1: 400
+    S2: 1200
+    Start: 10
+  capture_time: '2026-05-20T23:59:59Z'
+  capture_time_source: date_fallback
+  source_path: /media/runs/GX010700.MP4
+  clip_id: clip-7
+  fingerprint: GX010700.MP4:12bbeeccdc5fd0c3
+  committed_at: '2026-05-21T08:00:00Z'
+  metadata:
+    weather: wet
+    notes: first run, "slow"
+    tags:
+    - practice
+    - '2026'
+- id: on1
+  course_id: on_course
+  date: '2026-06-06'
+  filename: 'yes'
+  source_fps: 30.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 930
+    Start: 30
+  capture_time: '2026-06-06T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: yes:880d026f66947f83
+- id: cafe1
+  course_id: cafe
+  date: '2026-06-07'
+  filename: "GX01 Caf\xE9.MP4"
+  source_fps: 23.976
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 1201
+    S1: 500
+    Start: 0
+  capture_time: '2026-06-07T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: "GX01 Caf\xE9.MP4:b61a4cda943065ba"
+- id: round1
+  course_id: rounding
+  date: '2026-06-08'
+  filename: GX010800.MP4
+  source_fps: 16.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 1
+    Start: 0
+  capture_time: '2026-06-08T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: GX010800.MP4:f893b92e65564a8f
+### work/parity_db.yaml runs
+cafe1	cafe	2026-06-07	committed	GX01 Café.MP4
+on1	on_course	2026-06-06	committed	yes
+p7	pingu	2026-05-20	committed	GX010700.MP4
+p1	pingu	2026-06-01	committed	DJI_20260601100000_0001_D.MP4
+p2	pingu	2026-06-02	committed	GX010200.MP4
+p3	pingu	2026-06-03	committed	GX010300.MP4
+p4_ignored	pingu	2026-06-04	committed,ignored	GX010400.MP4
+p5_uncommitted	pingu	2026-06-04	uncommitted	GX010500.MP4
+p6_invalid	pingu	2026-06-05	committed	GX010600.MP4
+round1	rounding	2026-06-08	committed	GX010800.MP4
+exit 0
+### tests/fixtures/parity_invalid.yaml courses
+course	Course	2 sectors
+course	Duplicate	2 sectors
+	Blank ID	2 sectors
+blank_name	 	2 sectors
+zero	Zero sectors	0 sectors
+exit 0
+### tests/fixtures/parity_invalid.yaml runs
+bad_fps	course	2026-05-31	committed	C.MP4
+bad_source	course	2026-05-31	committed	D.MP4
+extras	course	2026-05-31	committed	F.MP4
+out_of_order	course	2026-05-31	committed	E.MP4
+run_a	course	2026-05-31	committed	A.MP4
+run_a	course	2026-05-31	committed	A.MP4
+missing_course	missing	2026-05-31	committed	B.MP4
+zero_sectors	zero	2026-05-31	committed	G.MP4
+exit 0
+### tests/fixtures/parity_invalid.yaml validate-db
+duplicate course id: course
+course id is required
+course blank_name name is required
+course zero sector_count must be at least 1
+duplicate run id: run_a
+run run_a: missing marker S1
+run missing_course references missing course missing
+run bad_fps source_fps must be greater than 0
+run bad_source capture_time_source must be one of date_fallback, filename_timestamp, filesystem_created, manual
+run out_of_order: marker Finish frame 300 must be after S1 frame 400
+run extras: unexpected marker S3
+run extras: unexpected marker S10
+run zero_sectors: sector_count must be at least 1
+exit 1
+### tests/fixtures/parity_invalid.yaml stats --course does-not-exist
+Error: course not found: does-not-exist
+exit 1
+### tests/fixtures/parity_invalid.yaml runs --course course
+bad_fps	course	2026-05-31	committed	C.MP4
+bad_source	course	2026-05-31	committed	D.MP4
+extras	course	2026-05-31	committed	F.MP4
+out_of_order	course	2026-05-31	committed	E.MP4
+run_a	course	2026-05-31	committed	A.MP4
+run_a	course	2026-05-31	committed	A.MP4
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course course
+Course: Course
+Eligible runs: 2
+Best: 0:03.000 (run_a)
+Optimal: 0:03.000
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course course --json
+{
+  "best_lap": {
+    "frames": 300,
+    "run_id": "run_a",
+    "seconds": 3.0
+  },
+  "course_id": "course",
+  "eligible_run_count": 2,
+  "fastest_sectors": [
+    {
+      "frames": 100,
+      "run_id": "run_a",
+      "seconds": 1.0,
+      "sector": 1
+    },
+    {
+      "frames": 200,
+      "run_id": "run_a",
+      "seconds": 2.0,
+      "sector": 2
+    }
+  ],
+  "optimal": {
+    "frames": 300,
+    "seconds": 3.0
+  }
+}
+exit 0
+### tests/fixtures/parity_invalid.yaml runs --course course
+bad_fps	course	2026-05-31	committed	C.MP4
+bad_source	course	2026-05-31	committed	D.MP4
+extras	course	2026-05-31	committed	F.MP4
+out_of_order	course	2026-05-31	committed	E.MP4
+run_a	course	2026-05-31	committed	A.MP4
+run_a	course	2026-05-31	committed	A.MP4
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course course
+Course: Course
+Eligible runs: 2
+Best: 0:03.000 (run_a)
+Optimal: 0:03.000
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course course --json
+{
+  "best_lap": {
+    "frames": 300,
+    "run_id": "run_a",
+    "seconds": 3.0
+  },
+  "course_id": "course",
+  "eligible_run_count": 2,
+  "fastest_sectors": [
+    {
+      "frames": 100,
+      "run_id": "run_a",
+      "seconds": 1.0,
+      "sector": 1
+    },
+    {
+      "frames": 200,
+      "run_id": "run_a",
+      "seconds": 2.0,
+      "sector": 2
+    }
+  ],
+  "optimal": {
+    "frames": 300,
+    "seconds": 3.0
+  }
+}
+exit 0
+### tests/fixtures/parity_invalid.yaml runs --course Blank ID
+
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course Blank ID
+Error: course not found: Blank ID
+exit 1
+### tests/fixtures/parity_invalid.yaml stats --course Blank ID --json
+Error: course not found: Blank ID
+exit 1
+### tests/fixtures/parity_invalid.yaml runs --course blank_name
+
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course blank_name
+Course:  
+Eligible runs: 0
+Best: --:--.---
+Optimal: --:--.---
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course blank_name --json
+{
+  "best_lap": null,
+  "course_id": "blank_name",
+  "eligible_run_count": 0,
+  "fastest_sectors": [],
+  "optimal": null
+}
+exit 0
+### tests/fixtures/parity_invalid.yaml runs --course zero
+zero_sectors	zero	2026-05-31	committed	G.MP4
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course zero
+Course: Zero sectors
+Eligible runs: 0
+Best: --:--.---
+Optimal: --:--.---
+exit 0
+### tests/fixtures/parity_invalid.yaml stats --course zero --json
+{
+  "best_lap": null,
+  "course_id": "zero",
+  "eligible_run_count": 0,
+  "fastest_sectors": [],
+  "optimal": null
+}
+exit 0
+### work/parity_invalid.yaml normalize-db
+Updated 8 run fingerprints
+exit 0
+### written parity_invalid.yaml
+schema_version: 2
+courses:
+- id: course
+  name: Course
+  sector_count: 2
+- id: course
+  name: Duplicate
+  sector_count: 2
+- id: ''
+  name: Blank ID
+  sector_count: 2
+- id: blank_name
+  name: ' '
+  sector_count: 2
+- id: zero
+  name: Zero sectors
+  sector_count: 0
+runs:
+- id: run_a
+  course_id: course
+  date: '2026-05-31'
+  filename: A.MP4
+  source_fps: 100.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 300
+    S1: 100
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: A.MP4:287cce0e090ba529
+- id: run_a
+  course_id: course
+  date: '2026-05-31'
+  filename: A.MP4
+  source_fps: 100.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 100
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: A.MP4:e437dc08695dc7d1
+- id: missing_course
+  course_id: missing
+  date: '2026-05-31'
+  filename: B.MP4
+  source_fps: 100.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 300
+    S1: 100
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: B.MP4:287cce0e090ba529
+- id: bad_fps
+  course_id: course
+  date: '2026-05-31'
+  filename: C.MP4
+  source_fps: 0.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 300
+    S1: 100
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: C.MP4:287cce0e090ba529
+- id: bad_source
+  course_id: course
+  date: '2026-05-31'
+  filename: D.MP4
+  source_fps: 50.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 300
+    S1: 100
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: guess
+  fingerprint: D.MP4:287cce0e090ba529
+- id: out_of_order
+  course_id: course
+  date: '2026-05-31'
+  filename: E.MP4
+  source_fps: 50.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 300
+    S1: 400
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: E.MP4:906c6fa86e83fdcc
+- id: extras
+  course_id: course
+  date: '2026-05-31'
+  filename: F.MP4
+  source_fps: 50.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 30
+    Lunch: 26
+    S1: 10
+    S10: 25
+    S3: 20
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: F.MP4:393cfc11caf8708e
+- id: zero_sectors
+  course_id: zero
+  date: '2026-05-31'
+  filename: G.MP4
+  source_fps: 50.0
+  committed: true
+  ignored: false
+  marker_frames:
+    Finish: 30
+    Start: 0
+  capture_time: '2026-05-31T23:59:59Z'
+  capture_time_source: date_fallback
+  fingerprint: G.MP4:eed4d92ad5a293bb
+### work/parity_invalid.yaml runs
+bad_fps	course	2026-05-31	committed	C.MP4
+bad_source	course	2026-05-31	committed	D.MP4
+extras	course	2026-05-31	committed	F.MP4
+out_of_order	course	2026-05-31	committed	E.MP4
+run_a	course	2026-05-31	committed	A.MP4
+run_a	course	2026-05-31	committed	A.MP4
+missing_course	missing	2026-05-31	committed	B.MP4
+zero_sectors	zero	2026-05-31	committed	G.MP4
+exit 0
+### examples/timer_db.yaml overlay-payload --course lower_whistler_a_line --markers examples/markers.csv --filename GX010123.MP4 --fps 59.94 --mode best_lap
+{
+  "best_lap_seconds": null,
+  "comparison_mode": "best_lap",
+  "course_id": "lower_whistler_a_line",
+  "final_text": "LIVE        0:10.010\nS1          0:02.002    --.---\nS2          0:02.336    --.---\nS3          0:02.586    --.---\nS4          0:03.086    --.---\nLAP         0:10.010    --.---",
+  "finish_frame": 700,
+  "generated_name": "Resolve Timer - lower_whistler_a_line - run_2026_05_31_001",
+  "marker_frames": {
+    "Finish": 700,
+    "S1": 220,
+    "S2": 360,
+    "S3": 515,
+    "Start": 100
+  },
+  "optimal_lap_seconds": null,
+  "rows": [
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.002",
+      "label": "S1",
+      "seconds": 2.002002002002002
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.336",
+      "label": "S2",
+      "seconds": 2.335669002335669
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.586",
+      "label": "S3",
+      "seconds": 2.5859192525859194
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:03.086",
+      "label": "S4",
+      "seconds": 3.0864197530864197
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:10.010",
+      "label": "LAP",
+      "seconds": 10.01001001001001
+    }
+  ],
+  "run_id": "run_2026_05_31_001",
+  "sector_reference_seconds": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "source_fps": 59.94,
+  "start_frame": 100
+}
+exit 0
+### examples/timer_db.yaml overlay-text --course lower_whistler_a_line --markers examples/markers.csv --filename GX010123.MP4 --fps 59.94 --mode best_lap
+LIVE        0:10.010
+S1          0:02.002    --.---
+S2          0:02.336    --.---
+S3          0:02.586    --.---
+S4          0:03.086    --.---
+LAP         0:10.010    --.---
+exit 0
+### examples/timer_db.yaml overlay-payload --course lower_whistler_a_line --markers examples/markers.csv --filename GX010123.MP4 --fps 59.94 --mode optimal
+{
+  "best_lap_seconds": null,
+  "comparison_mode": "optimal",
+  "course_id": "lower_whistler_a_line",
+  "final_text": "LIVE        0:10.010\nS1          0:02.002    --.---\nS2          0:02.336    --.---\nS3          0:02.586    --.---\nS4          0:03.086    --.---\nLAP         0:10.010    --.---",
+  "finish_frame": 700,
+  "generated_name": "Resolve Timer - lower_whistler_a_line - run_2026_05_31_001",
+  "marker_frames": {
+    "Finish": 700,
+    "S1": 220,
+    "S2": 360,
+    "S3": 515,
+    "Start": 100
+  },
+  "optimal_lap_seconds": null,
+  "rows": [
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.002",
+      "label": "S1",
+      "seconds": 2.002002002002002
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.336",
+      "label": "S2",
+      "seconds": 2.335669002335669
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:02.586",
+      "label": "S3",
+      "seconds": 2.5859192525859194
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:03.086",
+      "label": "S4",
+      "seconds": 3.0864197530864197
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:10.010",
+      "label": "LAP",
+      "seconds": 10.01001001001001
+    }
+  ],
+  "run_id": "run_2026_05_31_001",
+  "sector_reference_seconds": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "source_fps": 59.94,
+  "start_frame": 100
+}
+exit 0
+### examples/timer_db.yaml overlay-text --course lower_whistler_a_line --markers examples/markers.csv --filename GX010123.MP4 --fps 59.94 --mode optimal
+LIVE        0:10.010
+S1          0:02.002    --.---
+S2          0:02.336    --.---
+S3          0:02.586    --.---
+S4          0:03.086    --.---
+LAP         0:10.010    --.---
+exit 0
+### examples/timer_db.yaml overlay-payload --course lower_whistler_a_line --markers examples/markers.csv --filename GX010999.MP4 --fps 59.94 --capture-time 2026-06-01T08:00:00-07:00 --mode best_lap
+{
+  "best_lap_seconds": 10.01001001001001,
+  "comparison_mode": "best_lap",
+  "course_id": "lower_whistler_a_line",
+  "final_text": "LIVE        0:10.010\nS1          0:02.002    +0.000\nS2          0:02.336    +0.000\nS3          0:02.586    +0.000\nS4          0:03.086    +0.000\nLAP         0:10.010    +0.000\nBEST        0:10.010\nOPTIMAL     0:10.010",
+  "finish_frame": 700,
+  "generated_name": "Resolve Timer - lower_whistler_a_line - 129979c14aa405e2",
+  "marker_frames": {
+    "Finish": 700,
+    "S1": 220,
+    "S2": 360,
+    "S3": 515,
+    "Start": 100
+  },
+  "optimal_lap_seconds": 10.01001001001001,
+  "rows": [
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.002",
+      "label": "S1",
+      "seconds": 2.002002002002002
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.336",
+      "label": "S2",
+      "seconds": 2.335669002335669
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.586",
+      "label": "S3",
+      "seconds": 2.5859192525859194
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:03.086",
+      "label": "S4",
+      "seconds": 3.0864197530864197
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:10.010",
+      "label": "LAP",
+      "seconds": 10.01001001001001
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    2.002002002002002,
+    2.335669002335669,
+    2.5859192525859194,
+    3.0864197530864197
+  ],
+  "source_fps": 59.94,
+  "start_frame": 100
+}
+exit 0
+### examples/timer_db.yaml overlay-text --course lower_whistler_a_line --markers examples/markers.csv --filename GX010999.MP4 --fps 59.94 --capture-time 2026-06-01T08:00:00-07:00 --mode best_lap
+LIVE        0:10.010
+S1          0:02.002    +0.000
+S2          0:02.336    +0.000
+S3          0:02.586    +0.000
+S4          0:03.086    +0.000
+LAP         0:10.010    +0.000
+BEST        0:10.010
+OPTIMAL     0:10.010
+exit 0
+### examples/timer_db.yaml overlay-payload --course lower_whistler_a_line --markers examples/markers.csv --filename GX010999.MP4 --fps 59.94 --capture-time 2026-06-01T08:00:00-07:00 --mode optimal
+{
+  "best_lap_seconds": 10.01001001001001,
+  "comparison_mode": "optimal",
+  "course_id": "lower_whistler_a_line",
+  "final_text": "LIVE        0:10.010\nS1          0:02.002    +0.000\nS2          0:02.336    +0.000\nS3          0:02.586    +0.000\nS4          0:03.086    +0.000\nLAP         0:10.010    +0.000\nBEST        0:10.010\nOPTIMAL     0:10.010",
+  "finish_frame": 700,
+  "generated_name": "Resolve Timer - lower_whistler_a_line - 129979c14aa405e2",
+  "marker_frames": {
+    "Finish": 700,
+    "S1": 220,
+    "S2": 360,
+    "S3": 515,
+    "Start": 100
+  },
+  "optimal_lap_seconds": 10.01001001001001,
+  "rows": [
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.002",
+      "label": "S1",
+      "seconds": 2.002002002002002
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.336",
+      "label": "S2",
+      "seconds": 2.335669002335669
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:02.586",
+      "label": "S3",
+      "seconds": 2.5859192525859194
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:03.086",
+      "label": "S4",
+      "seconds": 3.0864197530864197
+    },
+    {
+      "delta": "+0.000",
+      "delta_seconds": 0.0,
+      "duration": "0:10.010",
+      "label": "LAP",
+      "seconds": 10.01001001001001
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    2.002002002002002,
+    2.335669002335669,
+    2.5859192525859194,
+    3.0864197530864197
+  ],
+  "source_fps": 59.94,
+  "start_frame": 100
+}
+exit 0
+### examples/timer_db.yaml overlay-text --course lower_whistler_a_line --markers examples/markers.csv --filename GX010999.MP4 --fps 59.94 --capture-time 2026-06-01T08:00:00-07:00 --mode optimal
+LIVE        0:10.010
+S1          0:02.002    +0.000
+S2          0:02.336    +0.000
+S3          0:02.586    +0.000
+S4          0:03.086    +0.000
+LAP         0:10.010    +0.000
+BEST        0:10.010
+OPTIMAL     0:10.010
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --capture-time 2026-06-02T18:00:00Z --mode best_lap
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    -1.668\nS2          0:30.864    +0.834\nS3          0:33.867    +0.501\nLAP         1:23.083    -0.334\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "-1.668",
+      "delta_seconds": -1.6683350016683356,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+0.834",
+      "delta_seconds": 0.8341675008341696,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "-0.334",
+      "delta_seconds": -0.33366700033367636,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.02002002002002,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --capture-time 2026-06-02T18:00:00Z --mode best_lap
+LIVE        1:23.083
+S1          0:18.352    -1.668
+S2          0:30.864    +0.834
+S3          0:33.867    +0.501
+LAP         1:23.083    -0.334
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --capture-time 2026-06-02T18:00:00Z --mode optimal
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    +2.752\nS2          0:30.864    +4.838\nS3          0:33.867    +0.501\nLAP         1:23.083    +8.090\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "+2.752",
+      "delta_seconds": 2.7516850183516848,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+4.838",
+      "delta_seconds": 4.838171504838172,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "+8.090",
+      "delta_seconds": 8.090357023690345,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    15.6,
+    26.026026026026027,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --capture-time 2026-06-02T18:00:00Z --mode optimal
+LIVE        1:23.083
+S1          0:18.352    +2.752
+S2          0:30.864    +4.838
+S3          0:33.867    +0.501
+LAP         1:23.083    +8.090
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-06-10 --mode best_lap
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    -1.668\nS2          0:30.864    +0.834\nS3          0:33.867    +0.501\nLAP         1:23.083    -0.334\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "-1.668",
+      "delta_seconds": -1.6683350016683356,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+0.834",
+      "delta_seconds": 0.8341675008341696,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "-0.334",
+      "delta_seconds": -0.33366700033367636,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.02002002002002,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-06-10 --mode best_lap
+LIVE        1:23.083
+S1          0:18.352    -1.668
+S2          0:30.864    +0.834
+S3          0:33.867    +0.501
+LAP         1:23.083    -0.334
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-06-10 --mode optimal
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    +2.752\nS2          0:30.864    +4.838\nS3          0:33.867    +0.501\nLAP         1:23.083    +8.090\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "+2.752",
+      "delta_seconds": 2.7516850183516848,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+4.838",
+      "delta_seconds": 4.838171504838172,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "+8.090",
+      "delta_seconds": 8.090357023690345,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    15.6,
+    26.026026026026027,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-06-10 --mode optimal
+LIVE        1:23.083
+S1          0:18.352    +2.752
+S2          0:30.864    +4.838
+S3          0:33.867    +0.501
+LAP         1:23.083    +8.090
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-05-01 --mode best_lap
+{
+  "best_lap_seconds": null,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    --.---\nS2          0:30.864    --.---\nS3          0:33.867    --.---\nLAP         1:23.083    --.---",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": null,
+  "rows": [
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    null,
+    null,
+    null
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-05-01 --mode best_lap
+LIVE        1:23.083
+S1          0:18.352    --.---
+S2          0:30.864    --.---
+S3          0:33.867    --.---
+LAP         1:23.083    --.---
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-05-01 --mode optimal
+{
+  "best_lap_seconds": null,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    --.---\nS2          0:30.864    --.---\nS3          0:33.867    --.---\nLAP         1:23.083    --.---",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": null,
+  "rows": [
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": null,
+      "delta_seconds": null,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    null,
+    null,
+    null
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --date 2026-05-01 --mode optimal
+LIVE        1:23.083
+S1          0:18.352    --.---
+S2          0:30.864    --.---
+S3          0:33.867    --.---
+LAP         1:23.083    --.---
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_p2.csv --filename GX010200.MP4 --fps 29.97 --mode best_lap
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:25.085\nS1          0:20.687    +0.667\nS2          0:26.026    -4.004\nS3          0:38.372    +5.005\nLAP         1:25.085    +1.668\nBEST        1:23.417\nOPTIMAL     1:18.997",
+  "finish_frame": 2600,
+  "generated_name": "Resolve Timer - pingu - p2",
+  "marker_frames": {
+    "Finish": 2600,
+    "S1": 670,
+    "S2": 1450,
+    "Start": 50
+  },
+  "optimal_lap_seconds": 78.99673006339674,
+  "rows": [
+    {
+      "delta": "+0.667",
+      "delta_seconds": 0.667334000667335,
+      "duration": "0:20.687",
+      "label": "S1",
+      "seconds": 20.687354020687355
+    },
+    {
+      "delta": "-4.004",
+      "delta_seconds": -4.004004004004003,
+      "duration": "0:26.026",
+      "label": "S2",
+      "seconds": 26.026026026026027
+    },
+    {
+      "delta": "+5.005",
+      "delta_seconds": 5.005005005005003,
+      "duration": "0:38.372",
+      "label": "S3",
+      "seconds": 38.37170503837171
+    },
+    {
+      "delta": "+1.668",
+      "delta_seconds": 1.668335001668325,
+      "duration": "1:25.085",
+      "label": "LAP",
+      "seconds": 85.08508508508508
+    }
+  ],
+  "run_id": "p2",
+  "sector_reference_seconds": [
+    20.02002002002002,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 29.97,
+  "start_frame": 50
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_p2.csv --filename GX010200.MP4 --fps 29.97 --mode best_lap
+LIVE        1:25.085
+S1          0:20.687    +0.667
+S2          0:26.026    -4.004
+S3          0:38.372    +5.005
+LAP         1:25.085    +1.668
+BEST        1:23.417
+OPTIMAL     1:18.997
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_p2.csv --filename GX010200.MP4 --fps 29.97 --mode optimal
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:25.085\nS1          0:20.687    +5.087\nS2          0:26.026    -4.004\nS3          0:38.372    +5.005\nLAP         1:25.085    +6.088\nBEST        1:23.417\nOPTIMAL     1:18.997",
+  "finish_frame": 2600,
+  "generated_name": "Resolve Timer - pingu - p2",
+  "marker_frames": {
+    "Finish": 2600,
+    "S1": 670,
+    "S2": 1450,
+    "Start": 50
+  },
+  "optimal_lap_seconds": 78.99673006339674,
+  "rows": [
+    {
+      "delta": "+5.087",
+      "delta_seconds": 5.087354020687355,
+      "duration": "0:20.687",
+      "label": "S1",
+      "seconds": 20.687354020687355
+    },
+    {
+      "delta": "-4.004",
+      "delta_seconds": -4.004004004004003,
+      "duration": "0:26.026",
+      "label": "S2",
+      "seconds": 26.026026026026027
+    },
+    {
+      "delta": "+5.005",
+      "delta_seconds": 5.005005005005003,
+      "duration": "0:38.372",
+      "label": "S3",
+      "seconds": 38.37170503837171
+    },
+    {
+      "delta": "+6.088",
+      "delta_seconds": 6.0883550216883435,
+      "duration": "1:25.085",
+      "label": "LAP",
+      "seconds": 85.08508508508508
+    }
+  ],
+  "run_id": "p2",
+  "sector_reference_seconds": [
+    15.6,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 29.97,
+  "start_frame": 50
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_p2.csv --filename GX010200.MP4 --fps 29.97 --mode optimal
+LIVE        1:25.085
+S1          0:20.687    +5.087
+S2          0:26.026    -4.004
+S3          0:38.372    +5.005
+LAP         1:25.085    +6.088
+BEST        1:23.417
+OPTIMAL     1:18.997
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename DJI_20260602120000_0001_D.MP4 --fps 59.94 --mode best_lap
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    -1.668\nS2          0:30.864    +0.834\nS3          0:33.867    +0.501\nLAP         1:23.083    -0.334\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "-1.668",
+      "delta_seconds": -1.6683350016683356,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+0.834",
+      "delta_seconds": 0.8341675008341696,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "-0.334",
+      "delta_seconds": -0.33366700033367636,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.02002002002002,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename DJI_20260602120000_0001_D.MP4 --fps 59.94 --mode best_lap
+LIVE        1:23.083
+S1          0:18.352    -1.668
+S2          0:30.864    +0.834
+S3          0:33.867    +0.501
+LAP         1:23.083    -0.334
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename DJI_20260602120000_0001_D.MP4 --fps 59.94 --mode optimal
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    +2.752\nS2          0:30.864    +4.838\nS3          0:33.867    +0.501\nLAP         1:23.083    +8.090\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "+2.752",
+      "delta_seconds": 2.7516850183516848,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+4.838",
+      "delta_seconds": 4.838171504838172,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "+8.090",
+      "delta_seconds": 8.090357023690345,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    15.6,
+    26.026026026026027,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename DJI_20260602120000_0001_D.MP4 --fps 59.94 --mode optimal
+LIVE        1:23.083
+S1          0:18.352    +2.752
+S2          0:30.864    +4.838
+S3          0:33.867    +0.501
+LAP         1:23.083    +8.090
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --source-path tests/fixtures/markers/pingu_new.csv --mode best_lap
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "best_lap",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    -1.668\nS2          0:30.864    +0.834\nS3          0:33.867    +0.501\nLAP         1:23.083    -0.334\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "-1.668",
+      "delta_seconds": -1.6683350016683356,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+0.834",
+      "delta_seconds": 0.8341675008341696,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "-0.334",
+      "delta_seconds": -0.33366700033367636,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.02002002002002,
+    30.03003003003003,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --source-path tests/fixtures/markers/pingu_new.csv --mode best_lap
+LIVE        1:23.083
+S1          0:18.352    -1.668
+S2          0:30.864    +0.834
+S3          0:33.867    +0.501
+LAP         1:23.083    -0.334
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --source-path tests/fixtures/markers/pingu_new.csv --mode optimal
+{
+  "best_lap_seconds": 83.41675008341676,
+  "comparison_mode": "optimal",
+  "course_id": "pingu",
+  "final_text": "LIVE        1:23.083\nS1          0:18.352    +2.752\nS2          0:30.864    +4.838\nS3          0:33.867    +0.501\nLAP         1:23.083    +8.090\nBEST        1:23.417\nOPTIMAL     1:14.993",
+  "finish_frame": 4980,
+  "generated_name": "Resolve Timer - pingu - 67f350b605dcbdb7",
+  "marker_frames": {
+    "Finish": 4980,
+    "S1": 1100,
+    "S2": 2950,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 74.99272605939274,
+  "rows": [
+    {
+      "delta": "+2.752",
+      "delta_seconds": 2.7516850183516848,
+      "duration": "0:18.352",
+      "label": "S1",
+      "seconds": 18.351685018351684
+    },
+    {
+      "delta": "+4.838",
+      "delta_seconds": 4.838171504838172,
+      "duration": "0:30.864",
+      "label": "S2",
+      "seconds": 30.8641975308642
+    },
+    {
+      "delta": "+0.501",
+      "delta_seconds": 0.5005005005005003,
+      "duration": "0:33.867",
+      "label": "S3",
+      "seconds": 33.867200533867205
+    },
+    {
+      "delta": "+8.090",
+      "delta_seconds": 8.090357023690345,
+      "duration": "1:23.083",
+      "label": "LAP",
+      "seconds": 83.08308308308308
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    15.6,
+    26.026026026026027,
+    33.366700033366705
+  ],
+  "source_fps": 59.94,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename GX019999.MP4 --fps 59.94 --source-path tests/fixtures/markers/pingu_new.csv --mode optimal
+LIVE        1:23.083
+S1          0:18.352    +2.752
+S2          0:30.864    +4.838
+S3          0:33.867    +0.501
+LAP         1:23.083    +8.090
+BEST        1:23.417
+OPTIMAL     1:14.993
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course cafe --markers tests/fixtures/markers/cafe.csv --filename x.MP4 --fps 50 --date 2026-07-01 --mode best_lap
+{
+  "best_lap_seconds": 50.09175842509176,
+  "comparison_mode": "best_lap",
+  "course_id": "cafe",
+  "final_text": "LIVE        0:26.000\nS1          0:08.000   -12.854\nS2          0:18.000   -11.238\nLAP         0:26.000   -24.092\nBEST        0:50.092\nOPTIMAL     0:50.092",
+  "finish_frame": 1300,
+  "generated_name": "Resolve Timer - cafe - 1221b9b8b8f8b38e",
+  "marker_frames": {
+    "Finish": 1300,
+    "S1": 400,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 50.09175842509176,
+  "rows": [
+    {
+      "delta": "-12.854",
+      "delta_seconds": -12.85418752085419,
+      "duration": "0:08.000",
+      "label": "S1",
+      "seconds": 8.0
+    },
+    {
+      "delta": "-11.238",
+      "delta_seconds": -11.237570904237572,
+      "duration": "0:18.000",
+      "label": "S2",
+      "seconds": 18.0
+    },
+    {
+      "delta": "-24.092",
+      "delta_seconds": -24.09175842509176,
+      "duration": "0:26.000",
+      "label": "LAP",
+      "seconds": 26.0
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.85418752085419,
+    29.23757090423757
+  ],
+  "source_fps": 50.0,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course cafe --markers tests/fixtures/markers/cafe.csv --filename x.MP4 --fps 50 --date 2026-07-01 --mode best_lap
+LIVE        0:26.000
+S1          0:08.000   -12.854
+S2          0:18.000   -11.238
+LAP         0:26.000   -24.092
+BEST        0:50.092
+OPTIMAL     0:50.092
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course cafe --markers tests/fixtures/markers/cafe.csv --filename x.MP4 --fps 50 --date 2026-07-01 --mode optimal
+{
+  "best_lap_seconds": 50.09175842509176,
+  "comparison_mode": "optimal",
+  "course_id": "cafe",
+  "final_text": "LIVE        0:26.000\nS1          0:08.000   -12.854\nS2          0:18.000   -11.238\nLAP         0:26.000   -24.092\nBEST        0:50.092\nOPTIMAL     0:50.092",
+  "finish_frame": 1300,
+  "generated_name": "Resolve Timer - cafe - 1221b9b8b8f8b38e",
+  "marker_frames": {
+    "Finish": 1300,
+    "S1": 400,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 50.09175842509176,
+  "rows": [
+    {
+      "delta": "-12.854",
+      "delta_seconds": -12.85418752085419,
+      "duration": "0:08.000",
+      "label": "S1",
+      "seconds": 8.0
+    },
+    {
+      "delta": "-11.238",
+      "delta_seconds": -11.237570904237572,
+      "duration": "0:18.000",
+      "label": "S2",
+      "seconds": 18.0
+    },
+    {
+      "delta": "-24.092",
+      "delta_seconds": -24.09175842509176,
+      "duration": "0:26.000",
+      "label": "LAP",
+      "seconds": 26.0
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    20.85418752085419,
+    29.23757090423757
+  ],
+  "source_fps": 50.0,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course cafe --markers tests/fixtures/markers/cafe.csv --filename x.MP4 --fps 50 --date 2026-07-01 --mode optimal
+LIVE        0:26.000
+S1          0:08.000   -12.854
+S2          0:18.000   -11.238
+LAP         0:26.000   -24.092
+BEST        0:50.092
+OPTIMAL     0:50.092
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course rounding --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode best_lap
+{
+  "best_lap_seconds": 0.0625,
+  "comparison_mode": "best_lap",
+  "course_id": "rounding",
+  "final_text": "LIVE        0:00.188\nS1          0:00.188    +0.125\nLAP         0:00.188    +0.125\nBEST        0:00.062\nOPTIMAL     0:00.062",
+  "finish_frame": 3,
+  "generated_name": "Resolve Timer - rounding - ad12d0f466bd030e",
+  "marker_frames": {
+    "Finish": 3,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 0.0625,
+  "rows": [
+    {
+      "delta": "+0.125",
+      "delta_seconds": 0.125,
+      "duration": "0:00.188",
+      "label": "S1",
+      "seconds": 0.1875
+    },
+    {
+      "delta": "+0.125",
+      "delta_seconds": 0.125,
+      "duration": "0:00.188",
+      "label": "LAP",
+      "seconds": 0.1875
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    0.0625
+  ],
+  "source_fps": 16.0,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course rounding --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode best_lap
+LIVE        0:00.188
+S1          0:00.188    +0.125
+LAP         0:00.188    +0.125
+BEST        0:00.062
+OPTIMAL     0:00.062
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course rounding --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode optimal
+{
+  "best_lap_seconds": 0.0625,
+  "comparison_mode": "optimal",
+  "course_id": "rounding",
+  "final_text": "LIVE        0:00.188\nS1          0:00.188    +0.125\nLAP         0:00.188    +0.125\nBEST        0:00.062\nOPTIMAL     0:00.062",
+  "finish_frame": 3,
+  "generated_name": "Resolve Timer - rounding - ad12d0f466bd030e",
+  "marker_frames": {
+    "Finish": 3,
+    "Start": 0
+  },
+  "optimal_lap_seconds": 0.0625,
+  "rows": [
+    {
+      "delta": "+0.125",
+      "delta_seconds": 0.125,
+      "duration": "0:00.188",
+      "label": "S1",
+      "seconds": 0.1875
+    },
+    {
+      "delta": "+0.125",
+      "delta_seconds": 0.125,
+      "duration": "0:00.188",
+      "label": "LAP",
+      "seconds": 0.1875
+    }
+  ],
+  "run_id": null,
+  "sector_reference_seconds": [
+    0.0625
+  ],
+  "source_fps": 16.0,
+  "start_frame": 0
+}
+exit 0
+### tests/fixtures/parity_db.yaml overlay-text --course rounding --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode optimal
+LIVE        0:00.188
+S1          0:00.188    +0.125
+LAP         0:00.188    +0.125
+BEST        0:00.062
+OPTIMAL     0:00.062
+exit 0
+### tests/fixtures/parity_db.yaml overlay-payload --course empty --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode best_lap
+Error: missing marker S1
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course empty --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode best_lap
+Error: missing marker S1
+exit 1
+### tests/fixtures/parity_db.yaml overlay-payload --course empty --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode optimal
+Error: missing marker S1
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course empty --markers tests/fixtures/markers/rounding.csv --filename x.MP4 --fps 16 --date 2026-07-01 --mode optimal
+Error: missing marker S1
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course nope --markers tests/fixtures/markers/pingu_new.csv --filename x.MP4 --fps 59.94
+Error: course not found: nope
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/missing_marker.csv --filename x.MP4 --fps 59.94
+Error: missing marker S2
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/duplicate.csv --filename x.MP4 --fps 59.94
+Error: duplicate marker S1
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/bad_columns.csv --filename x.MP4 --fps 59.94
+Error: marker CSV missing columns: name
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/bad_frame.csv --filename x.MP4 --fps 59.94
+Error: tests/fixtures/markers/bad_frame.csv: row 3 invalid frame 'ten'
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/blank_name.csv --filename x.MP4 --fps 59.94
+Error: tests/fixtures/markers/blank_name.csv: row 3 missing marker name
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/does_not_exist.csv --filename x.MP4 --fps 59.94
+Error: could not read marker CSV tests/fixtures/markers/does_not_exist.csv: [Errno 2] No such file or directory: 'tests/fixtures/markers/does_not_exist.csv'
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename x.MP4 --fps 0
+Error: source_fps must be greater than 0
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename x.MP4 --fps 59.94 --capture-time nope
+Error: Invalid isoformat string: 'nope'
+exit 1
+### tests/fixtures/parity_db.yaml overlay-text --course pingu --markers tests/fixtures/markers/pingu_new.csv --filename x.MP4 --fps 59.94 --date 2026-13-01
+Error: month must be in 1..12
+exit 1

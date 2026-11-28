@@ -20,7 +20,7 @@ GitHub release. The app updates itself from those (Settings → Updates).
 | Something that was wrong now works, including dependency fixes (`fix(deps): ...`) | `fix` | patch: 1.4.2 → 1.4.3 |
 | The same, faster or lighter | `perf` | patch |
 | Undoing an earlier change | `revert` | patch |
-| **Breaking**: an older Ghost Run or the Python script can't read what this one writes (`timer_db.yaml`, a library schema older builds refuse), a setting, command, flag or file is removed or means something else, or you have to do something by hand after updating | add `!` (`feat!:`, `fix!:`), and say what to do in the PR description | major: 1.4.2 → 2.0.0 |
+| **Breaking**: an older Ghost Run can't read what this one writes (`timer_db.yaml`, a library schema older builds refuse), a setting, command, flag or file is removed or means something else, or you have to do something by hand after updating | add `!` (`feat!:`, `fix!:`), and say what to do in the PR description | major: 1.4.2 → 2.0.0 |
 | Only docs, tests, CI, the build, formatting, tidying, or code moved around with no visible difference | `docs`, `test`, `ci`, `build`, `chore`, `style`, `refactor` | no release (the next one includes it) |
 
 When a PR does several things, title it by the biggest. Scopes are optional
