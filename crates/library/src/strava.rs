@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use chrono::NaiveDateTime;
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Clip, Library};
@@ -833,33 +832,21 @@ impl Library {
     }
 
     pub fn strava_activities(&self) -> Result<Vec<Activity>> {
-        let mut stmt = self.db.prepare(
+        let mut out = Vec::new();
+        for r in self.db.query(
             "SELECT id, name, sport, start_local, elapsed_seconds, distance_m, climb_m
              FROM strava_activities ORDER BY start_local",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, i64>(4)?,
-                r.get::<_, f64>(5)?,
-                r.get::<_, f64>(6)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, name, sport, start, elapsed_seconds, distance_m, climb_m) = row?;
-            if let Some(start_local) = local_time(&start) {
+            &[],
+        )? {
+            if let Some(start_local) = local_time(&r.get::<String>(3)?) {
                 out.push(Activity {
-                    id,
-                    name,
-                    sport,
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    sport: r.get(2)?,
                     start_local,
-                    elapsed_seconds,
-                    distance_m,
-                    climb_m,
+                    elapsed_seconds: r.get(4)?,
+                    distance_m: r.get(5)?,
+                    climb_m: r.get(6)?,
                 });
             }
         }
@@ -868,17 +855,20 @@ impl Library {
 
     pub fn set_strava_activity(&self, a: &Activity) -> Result<()> {
         self.db.execute(
-            "INSERT INTO strava_activities VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT (id) DO UPDATE SET name = ?2, sport = ?3, start_local = ?4,
-               elapsed_seconds = ?5, distance_m = ?6, climb_m = ?7",
-            params![
-                a.id,
-                a.name,
-                a.sport,
-                a.start_local.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                a.elapsed_seconds,
-                a.distance_m,
-                a.climb_m
+            "INSERT INTO strava_activities
+               (id, name, sport, start_local, elapsed_seconds, distance_m, climb_m)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (id) DO UPDATE SET name = excluded.name, sport = excluded.sport,
+               start_local = excluded.start_local, elapsed_seconds = excluded.elapsed_seconds,
+               distance_m = excluded.distance_m, climb_m = excluded.climb_m",
+            &[
+                &a.id,
+                &a.name,
+                &a.sport,
+                &a.start_local.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                &a.elapsed_seconds,
+                &a.distance_m,
+                &a.climb_m,
             ],
         )?;
         Ok(())
@@ -886,10 +876,11 @@ impl Library {
 
     /// Activities whose streams and efforts have been read.
     pub fn strava_detailed(&self) -> Result<Vec<i64>> {
-        let mut stmt = self.db.prepare("SELECT activity FROM strava_streams")?;
-        Ok(stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
+        self.db
+            .query("SELECT activity FROM strava_streams", &[])?
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
     }
 
     pub fn set_strava_detail(
@@ -898,37 +889,43 @@ impl Library {
         streams: &Streams,
         efforts: &[Effort],
     ) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute(
-            "INSERT OR REPLACE INTO strava_streams VALUES (?1, ?2)",
-            params![activity, serde_json::to_string(streams)?],
-        )?;
-        tx.execute("DELETE FROM strava_efforts WHERE activity = ?1", [activity])?;
-        for e in efforts {
-            tx.execute(
-                "INSERT INTO strava_efforts VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    e.activity,
-                    e.segment,
-                    e.name,
-                    e.start_local.format("%Y-%m-%dT%H:%M:%S").to_string(),
-                    e.elapsed_seconds
-                ],
+        self.db.transaction(|| {
+            self.db.execute(
+                "INSERT INTO strava_streams (activity, streams) VALUES ($1, $2)
+                 ON CONFLICT (activity) DO UPDATE SET streams = excluded.streams",
+                &[&activity, &serde_json::to_string(streams)?],
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            self.db.execute(
+                "DELETE FROM strava_efforts WHERE activity = $1",
+                &[&activity],
+            )?;
+            for e in efforts {
+                self.db.execute(
+                    "INSERT INTO strava_efforts
+                       (activity, segment, name, start_local, elapsed_seconds)
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[
+                        &e.activity,
+                        &e.segment,
+                        &e.name,
+                        &e.start_local.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                        &e.elapsed_seconds,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     pub fn strava_streams(&self, activity: i64) -> Result<Option<Streams>> {
         let json: Option<String> = self
             .db
-            .query_row(
-                "SELECT streams FROM strava_streams WHERE activity = ?1",
-                [activity],
-                |r| r.get(0),
-            )
-            .optional()?;
+            .query_opt(
+                "SELECT streams FROM strava_streams WHERE activity = $1",
+                &[&activity],
+            )?
+            .map(|r| r.get(0))
+            .transpose()?;
         json.map(|j| serde_json::from_str(&j).map_err(Into::into))
             .transpose()
     }
@@ -937,36 +934,29 @@ impl Library {
     pub fn strava_index(&self) -> Result<Index> {
         let activities = self.strava_activities()?;
         let mut streams = HashMap::new();
-        for id in self.strava_detailed()? {
-            if let Some(s) = self.strava_streams(id)? {
-                streams.insert(id, s);
+        for r in self
+            .db
+            .query("SELECT activity, streams FROM strava_streams", &[])?
+        {
+            if let Ok(s) = serde_json::from_str(&r.get::<String>(1)?) {
+                streams.insert(r.get::<i64>(0)?, s);
             }
         }
-        let mut stmt = self.db.prepare(
+        let mut efforts = Vec::new();
+        for r in self.db.query(
             "SELECT activity, segment, name, start_local, elapsed_seconds FROM strava_efforts",
-        )?;
-        let efforts = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, String>(3)?,
-                    r.get::<_, f64>(4)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-            .into_iter()
-            .filter_map(|(activity, segment, name, start, elapsed_seconds)| {
-                Some(Effort {
-                    activity,
-                    segment,
-                    name,
-                    start_local: local_time(&start)?,
-                    elapsed_seconds,
-                })
-            })
-            .collect();
+            &[],
+        )? {
+            if let Some(start_local) = local_time(&r.get::<String>(3)?) {
+                efforts.push(Effort {
+                    activity: r.get(0)?,
+                    segment: r.get(1)?,
+                    name: r.get(2)?,
+                    start_local,
+                    elapsed_seconds: r.get(4)?,
+                });
+            }
+        }
         Ok(Index {
             activities,
             streams,
@@ -977,10 +967,12 @@ impl Library {
 
     /// Forgets everything synced from Strava.
     pub fn clear_strava(&self) -> Result<()> {
-        self.db.execute_batch(
-            "DELETE FROM strava_activities; DELETE FROM strava_streams; DELETE FROM strava_efforts;",
-        )?;
-        Ok(())
+        self.db.transaction(|| {
+            for table in ["strava_activities", "strava_streams", "strava_efforts"] {
+                self.db.execute(&format!("DELETE FROM {table}"), &[])?;
+            }
+            Ok(())
+        })
     }
 }
 

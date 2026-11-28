@@ -5,7 +5,6 @@
 //! most.
 
 use anyhow::{Result, ensure};
-use rusqlite::{OptionalExtension, params};
 
 use crate::store::Library;
 
@@ -83,33 +82,30 @@ impl Library {
 
     /// Every feature, by name, with its attempts.
     pub fn features(&self) -> Result<Vec<Feature>> {
-        let mut stmt = self
+        let mut features = self
             .db
-            .prepare("SELECT id, name FROM features ORDER BY name COLLATE NOCASE")?;
-        let mut features = stmt
-            .query_map([], |r| {
+            .query(
+                "SELECT id, name FROM features ORDER BY lower(name), name",
+                &[],
+            )?
+            .iter()
+            .map(|r| {
                 Ok(Feature {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     attempts: Vec::new(),
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut stmt = self
-            .db
-            .prepare("SELECT clip, feature, outcome FROM feature_attempts ORDER BY clip")?;
-        for row in stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })? {
-            let (clip, feature, outcome) = row?;
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for r in self.db.query(
+            "SELECT clip, feature, outcome FROM feature_attempts ORDER BY clip",
+            &[],
+        )? {
+            let feature: i64 = r.get(1)?;
             if let Some(f) = features.iter_mut().find(|f| f.id == feature) {
                 f.attempts.push(Attempt {
-                    clip,
-                    outcome: Outcome::parse(&outcome),
+                    clip: r.get(0)?,
+                    outcome: Outcome::parse(&r.get::<String>(2)?),
                 });
             }
         }
@@ -120,64 +116,62 @@ impl Library {
     pub fn feature(&self, name: &str) -> Result<i64> {
         let name = name.trim();
         ensure!(!name.is_empty(), "a feature needs a name");
-        let found: Option<i64> = self
-            .db
-            .query_row(
-                "SELECT id FROM features WHERE name = ?1 COLLATE NOCASE",
-                [name],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = found {
-            return Ok(id);
+        if let Some(r) = self.db.query_opt(
+            "SELECT id FROM features WHERE lower(name) = lower($1) ORDER BY id",
+            &[&name],
+        )? {
+            return r.get(0);
         }
-        self.db
-            .execute("INSERT INTO features (name) VALUES (?1)", [name])?;
-        Ok(self.db.last_insert_rowid())
+        self.db.query_one(
+            "INSERT INTO features (name) VALUES ($1) RETURNING id",
+            &[&name],
+        )
     }
 
     /// Makes these clips attempts at `feature` with this outcome (moving them
     /// from another feature if they were attempts at one).
     pub fn set_attempts(&self, feature: i64, clips: &[String], outcome: Outcome) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute(
-                "INSERT INTO feature_attempts (clip, feature, outcome) VALUES (?1, ?2, ?3)
-                 ON CONFLICT (clip) DO UPDATE SET feature = ?2, outcome = ?3",
-                params![clip, feature, outcome.text()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db.execute(
+                    "INSERT INTO feature_attempts (clip, feature, outcome) VALUES ($1, $2, $3)
+                     ON CONFLICT (clip) DO UPDATE SET feature = excluded.feature,
+                       outcome = excluded.outcome",
+                    &[clip, &feature, &outcome.text()],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// These clips aren't attempts at anything.
     pub fn remove_attempts(&self, clips: &[String]) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        for clip in clips {
-            tx.execute("DELETE FROM feature_attempts WHERE clip = ?1", [clip])?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            for clip in clips {
+                self.db
+                    .execute("DELETE FROM feature_attempts WHERE clip = $1", &[clip])?;
+            }
+            Ok(())
+        })
     }
 
     pub fn rename_feature(&self, id: i64, name: &str) -> Result<()> {
         let name = name.trim();
         ensure!(!name.is_empty(), "a feature needs a name");
-        self.db.execute(
-            "UPDATE features SET name = ?2 WHERE id = ?1",
-            params![id, name],
-        )?;
+        self.db
+            .execute("UPDATE features SET name = $2 WHERE id = $1", &[&id, &name])?;
         Ok(())
     }
 
     /// Deletes a feature; its clips stay in the Library.
     pub fn delete_feature(&self, id: i64) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM feature_attempts WHERE feature = ?1", [id])?;
-        tx.execute("DELETE FROM features WHERE id = ?1", [id])?;
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            self.db
+                .execute("DELETE FROM feature_attempts WHERE feature = $1", &[&id])?;
+            self.db
+                .execute("DELETE FROM features WHERE id = $1", &[&id])?;
+            Ok(())
+        })
     }
 }
 

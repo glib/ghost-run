@@ -19,7 +19,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::store::{Clip, Library};
@@ -349,61 +348,62 @@ impl Library {
 
     /// Every video, newest first.
     pub fn videos(&self) -> Result<Vec<Video>> {
-        let mut stmt = self
+        let ids: Vec<i64> = self
             .db
-            .prepare("SELECT id FROM videos ORDER BY created_ms DESC, id DESC")?;
-        let ids = stmt
-            .query_map([], |r| r.get::<_, i64>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .query(
+                "SELECT id FROM videos ORDER BY created_ms DESC, id DESC",
+                &[],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect::<Result<_>>()?;
         ids.into_iter()
             .map(|id| self.video(id)?.context("a video went missing"))
             .collect()
     }
 
     pub fn video(&self, id: i64) -> Result<Option<Video>> {
-        let video = self
-            .db
-            .query_row(
-                "SELECT title, kind, status, project, timeline, link, published
-                 FROM videos WHERE id = ?1",
-                [id],
-                |r| {
-                    Ok(Video {
-                        id,
-                        title: r.get(0)?,
-                        kind: r.get(1)?,
-                        status: Status::parse(&r.get::<_, String>(2)?),
-                        project: r.get(3)?,
-                        timeline: r.get(4)?,
-                        link: r.get(5)?,
-                        published: r.get(6)?,
-                        items: Vec::new(),
-                    })
-                },
-            )
-            .optional()?;
-        let Some(mut video) = video else {
+        let Some(r) = self.db.query_opt(
+            "SELECT title, kind, status, project, timeline, link, published
+             FROM videos WHERE id = $1",
+            &[&id],
+        )?
+        else {
             return Ok(None);
         };
-        let mut stmt = self.db.prepare(
-            "SELECT clip, path, first_frame, frames, timer, card, caption FROM video_items
-             WHERE video = ?1 ORDER BY position",
-        )?;
-        video.items = stmt
-            .query_map([id], |r| {
+        let mut video = Video {
+            id,
+            title: r.get(0)?,
+            kind: r.get(1)?,
+            status: Status::parse(&r.get::<String>(2)?),
+            project: r.get(3)?,
+            timeline: r.get(4)?,
+            link: r.get(5)?,
+            published: r.get(6)?,
+            items: Vec::new(),
+        };
+        video.items = self
+            .db
+            .query(
+                "SELECT clip, path, first_frame, frames, timer, card, caption FROM video_items
+                 WHERE video = $1 ORDER BY position",
+                &[&id],
+            )?
+            .iter()
+            .map(|r| {
                 Ok(Item {
                     clip: r.get(0)?,
-                    path: PathBuf::from(r.get::<_, String>(1)?),
+                    path: self.unstored(&r.get::<String>(1)?),
                     first_frame: r.get(2)?,
                     frames: r.get(3)?,
                     timer: r.get(4)?,
                     card: r
-                        .get::<_, Option<String>>(5)?
+                        .get::<Option<String>>(5)?
                         .and_then(|j| serde_json::from_str(&j).ok()),
                     caption: r.get(6)?,
                 })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            })
+            .collect::<Result<_>>()?;
         Ok(Some(video))
     }
 
@@ -411,11 +411,10 @@ impl Library {
     pub fn new_video(&self, title: &str, kind: &str) -> Result<i64> {
         let title = title.trim();
         anyhow::ensure!(!title.is_empty(), "a video needs a title");
-        self.db.execute(
-            "INSERT INTO videos (title, kind, created_ms) VALUES (?1, ?2, ?3)",
-            params![title, kind, chrono::Utc::now().timestamp_millis()],
-        )?;
-        Ok(self.db.last_insert_rowid())
+        self.db.query_one(
+            "INSERT INTO videos (title, kind, created_ms) VALUES ($1, $2, $3) RETURNING id",
+            &[&title, &kind, &chrono::Utc::now().timestamp_millis()],
+        )
     }
 
     /// Saves a video's title, status, Resolve names, link and date (not its
@@ -423,18 +422,18 @@ impl Library {
     pub fn save_video(&self, v: &Video) -> Result<()> {
         anyhow::ensure!(!v.title.trim().is_empty(), "a video needs a title");
         self.db.execute(
-            "UPDATE videos SET title = ?2, kind = ?3, status = ?4, project = ?5,
-               timeline = ?6, link = ?7, published = ?8
-             WHERE id = ?1",
-            params![
-                v.id,
-                v.title.trim(),
-                v.kind,
-                v.status.text(),
-                v.project,
-                v.timeline,
-                v.link,
-                v.published
+            "UPDATE videos SET title = $2, kind = $3, status = $4, project = $5,
+               timeline = $6, link = $7, published = $8
+             WHERE id = $1",
+            &[
+                &v.id,
+                &v.title.trim(),
+                &v.kind,
+                &v.status.text(),
+                &v.project,
+                &v.timeline,
+                &v.link,
+                &v.published,
             ],
         )?;
         Ok(())
@@ -442,28 +441,29 @@ impl Library {
 
     /// Replaces a video's clips.
     pub fn set_items(&self, video: i64, items: &[Item]) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM video_items WHERE video = ?1", [video])?;
-        for (position, i) in items.iter().enumerate() {
-            tx.execute(
-                "INSERT INTO video_items
-                   (video, position, clip, path, first_frame, frames, timer, card, caption)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    video,
-                    position as i64,
-                    i.clip,
-                    i.path.to_string_lossy(),
-                    i.first_frame,
-                    i.frames,
-                    i.timer,
-                    i.card.as_ref().map(serde_json::to_string).transpose()?,
-                    i.caption
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            self.db
+                .execute("DELETE FROM video_items WHERE video = $1", &[&video])?;
+            for (position, i) in items.iter().enumerate() {
+                self.db.execute(
+                    "INSERT INTO video_items
+                       (video, position, clip, path, first_frame, frames, timer, card, caption)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                    &[
+                        &video,
+                        &(position as i64),
+                        &i.clip,
+                        &self.stored(&i.path),
+                        &i.first_frame,
+                        &i.frames,
+                        &i.timer,
+                        &i.card.as_ref().map(serde_json::to_string).transpose()?,
+                        &i.caption,
+                    ],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// Adds clips to the end of a video, skipping ones already in it.
@@ -483,52 +483,60 @@ impl Library {
     }
 
     pub fn delete_video(&self, id: i64) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute("DELETE FROM video_usage WHERE video = ?1", [id])?;
-        tx.execute("DELETE FROM video_items WHERE video = ?1", [id])?;
-        tx.execute("DELETE FROM videos WHERE id = ?1", [id])?;
-        tx.commit()?;
-        Ok(())
+        self.db.transaction(|| {
+            self.db
+                .execute("DELETE FROM video_usage WHERE video = $1", &[&id])?;
+            self.db
+                .execute("DELETE FROM video_items WHERE video = $1", &[&id])?;
+            self.db
+                .execute("DELETE FROM videos WHERE id = $1", &[&id])?;
+            Ok(())
+        })
     }
 
     /// Replaces a video's usage from `source` (`built` or `timeline`).
     pub fn set_usage(&self, video: i64, source: &str, uses: &[Use]) -> Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM video_usage WHERE video = ?1 AND source = ?2",
-            params![video, source],
-        )?;
-        for u in uses {
-            tx.execute(
-                "INSERT INTO video_usage VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![video, source, u.clip, u.first_frame, u.frames],
+        self.db.transaction(|| {
+            self.db.execute(
+                "DELETE FROM video_usage WHERE video = $1 AND source = $2",
+                &[&video, &source],
             )?;
-        }
-        tx.commit()?;
-        Ok(())
+            for u in uses {
+                self.db.execute(
+                    "INSERT INTO video_usage (video, source, clip, first_frame, frames)
+                     VALUES ($1, $2, $3, $4, $5)",
+                    &[&video, &source, &u.clip, &u.first_frame, &u.frames],
+                )?;
+            }
+            Ok(())
+        })
     }
 
     /// The videos whose usage was read back from their timeline.
     pub fn read_back(&self) -> Result<HashSet<i64>> {
-        let mut stmt = self
-            .db
-            .prepare("SELECT DISTINCT video FROM video_usage WHERE source = 'timeline'")?;
-        let ids = stmt
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<HashSet<i64>>>()?;
-        Ok(ids)
+        self.db
+            .query(
+                "SELECT DISTINCT video FROM video_usage WHERE source = 'timeline'",
+                &[],
+            )?
+            .iter()
+            .map(|r| r.get(0))
+            .collect()
     }
 
     /// Each video's usage: what was read from its timeline if that's been
     /// done, else what was built.
     pub fn usage(&self) -> Result<HashMap<i64, Vec<Use>>> {
-        let mut stmt = self
+        let rows = self
             .db
-            .prepare("SELECT video, source, clip, first_frame, frames FROM video_usage")?;
-        let rows = stmt
-            .query_map([], |r| {
+            .query(
+                "SELECT video, source, clip, first_frame, frames FROM video_usage",
+                &[],
+            )?
+            .iter()
+            .map(|r| {
                 Ok((
-                    r.get::<_, String>(1)?,
+                    r.get::<String>(1)?,
                     Use {
                         video: r.get(0)?,
                         clip: r.get(2)?,
@@ -536,8 +544,8 @@ impl Library {
                         frames: r.get(4)?,
                     },
                 ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            })
+            .collect::<Result<Vec<_>>>()?;
         let read: std::collections::HashSet<i64> = rows
             .iter()
             .filter(|(s, _)| s == "timeline")
