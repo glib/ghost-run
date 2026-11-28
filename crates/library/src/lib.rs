@@ -16,6 +16,7 @@
 //! - [`backup`]: whether each clip's original is verified on the NAS.
 //! - [`catalog_backup`]: a daily copy of the catalog and run database on the NAS.
 //! - [`videos`]: videos, the clips in them, and what they used.
+//! - [`update`]: updates from Ghost Run's GitHub releases.
 //! - [`auto`]: placing a clip's markers from the course's reference run, and
 //!   telling which course a clip is.
 
@@ -42,6 +43,7 @@ pub mod settings;
 pub mod store;
 pub mod strava;
 pub mod thumbs;
+pub mod update;
 pub mod videos;
 
 pub use probe::MediaInfo;

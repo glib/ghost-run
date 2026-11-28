@@ -416,7 +416,8 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         | Change::Videos
         | Change::BuildVideo
         | Change::ShowVideo
-        | Change::Strava => {}
+        | Change::Strava
+        | Change::Update => {}
     });
 
     let p = page.clone();

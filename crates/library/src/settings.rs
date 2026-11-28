@@ -37,6 +37,22 @@ pub struct AppSettings {
     /// or only when a clip needs one (`false`); `None`: in the background
     /// unless this machine has a battery ([`Self::background_previews`]).
     pub previews_in_background: Option<bool>,
+    /// What to do when a newer release is out (`crate::update`).
+    pub updates: UpdatePolicy,
+}
+
+/// What the app does about new releases.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdatePolicy {
+    /// Say a release is out and install it when asked.
+    #[default]
+    Ask,
+    /// Install releases in the background; a restart starts the new one.
+    /// (A build of your own branch is still only offered them.)
+    Automatic,
+    /// Don't ask GitHub at all.
+    Off,
 }
 
 /// The default for [`AppSettings::local_copies_gb`].
@@ -142,6 +158,7 @@ mod tests {
             local_copies_gb: Some(80),
             kinds_folder: Some("/home/x/kinds".into()),
             brand_kit: Some("/home/x/brand/brand.toml".into()),
+            updates: UpdatePolicy::Automatic,
             previews_in_background: Some(false),
         };
         settings.save_to(&path).unwrap();
