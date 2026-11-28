@@ -130,6 +130,9 @@ struct State {
     courses: Vec<(String, String)>,
     view: View,
     runs_error: Option<String>,
+    /// Why the catalog is read-only (a shared one out of reach), or couldn't
+    /// be opened.
+    catalog_offline: Option<String>,
     /// Clips with markers placed but not committed.
     drafted: HashMap<PathBuf, Draft>,
     selected: HashSet<PathBuf>,
@@ -178,6 +181,7 @@ struct Page {
     banner_text: gtk::Label,
     add_first: gtk::Button,
     show_local: gtk::Button,
+    try_again: gtk::Button,
     copy_here: gtk::Button,
     remove_local: gtk::Button,
     counts: gtk::Label,
@@ -263,9 +267,11 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     banner_text.set_hexpand(true);
     let add_first = button("Add folder…");
     let show_local = button("Show them");
+    let try_again = button("Try again");
     banner.append(&banner_text);
     banner.append(&add_first);
     banner.append(&show_local);
+    banner.append(&try_again);
     content.append(&banner);
 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -417,6 +423,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
             courses: Vec::new(),
             view: View::All,
             runs_error: None,
+            catalog_offline: None,
             drafted: HashMap::new(),
             selected: HashSet::new(),
             making: HashSet::new(),
@@ -444,6 +451,7 @@ fn library_view(shared: &Shared) -> gtk::Widget {
         banner_text,
         add_first: add_first.clone(),
         show_local: show_local.clone(),
+        try_again: try_again.clone(),
         copy_here: copy_here.clone(),
         remove_local: remove_local.clone(),
         counts,
@@ -589,6 +597,11 @@ fn library_view(shared: &Shared) -> gtk::Widget {
     let p = page.clone();
     add_first.connect_clicked(move |_| crate::settings_dialog::add_folder(&p.shared));
     let p = page.clone();
+    try_again.connect_clicked(move |_| {
+        library::shared::retry_now();
+        start_scan(&p);
+    });
+    let p = page.clone();
     shared.subscribe(move |change| {
         match change {
             Change::TimeClip
@@ -602,6 +615,16 @@ fn library_view(shared: &Shared) -> gtk::Widget {
                     p.state.borrow_mut().view = View::Drafts;
                     fill_courses(&p);
                     refill(&p);
+                }
+                return;
+            }
+            // A different catalog: everything again from it.
+            Change::Catalog => {
+                load_runs(&p);
+                fill_courses(&p);
+                refill(&p);
+                if !p.state.borrow().busy {
+                    start_scan(&p);
                 }
                 return;
             }
@@ -870,13 +893,6 @@ fn make_previews(
 
 fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cancel: Cancel) {
     std::thread::spawn(move || {
-        let library = match Library::open_default() {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = replies.send(Reply::Error(format!("Library could not be opened: {e:#}")));
-                return;
-            }
-        };
         let send_clips = |library: &Library| {
             if let Ok(clips) = library.clips() {
                 let _ = replies.send(Reply::Clips(clips));
@@ -884,6 +900,16 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
         };
         for command in commands {
             cancel.store(false, Ordering::Relaxed);
+            // Opened for each command: a shared catalog may have come back
+            // (or gone) since the last one.
+            let library = match Library::open_default() {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ =
+                        replies.send(Reply::Error(format!("Library could not be opened: {e:#}")));
+                    continue;
+                }
+            };
             match command {
                 Command::Scan(folders, roots, backup_to, background) => {
                     let result = scan::scan(&folders, &roots, &library, &cancel, |p| {
@@ -901,6 +927,7 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     if let Ok(clips) = library.clips() {
                         let _ = replies.send(Reply::Backups(backups(&clips)));
                     }
+                    crate::catalog_ui::refresh_copy_quietly();
                     let backed_up = backup_to.map(|b| {
                         ingest::storage::Root::destination(&b.archive).and_then(|_| {
                             library::catalog_backup::run(
@@ -1376,13 +1403,17 @@ fn refresh_controls(p: &Page) {
     let no_folders = s.scanned.is_empty();
     let limit = p.shared.settings().local_copies_limit();
     let too_big = s.local_bytes > limit;
+    let offline = s.catalog_offline.clone();
     p.banner
-        .set_visible(no_folders || s.runs_error.is_some() || too_big);
+        .set_visible(no_folders || offline.is_some() || s.runs_error.is_some() || too_big);
     p.add_first.set_visible(no_folders);
+    p.try_again.set_visible(!no_folders && offline.is_some());
     p.show_local
-        .set_visible(!no_folders && s.runs_error.is_none() && too_big);
+        .set_visible(!no_folders && offline.is_none() && s.runs_error.is_none() && too_big);
     p.banner_text.set_text(&if no_folders {
         "Add the folders your footage is in. Ghost Run lists every clip in them and keeps the list up to date.".to_owned()
+    } else if let Some(why) = offline {
+        why
     } else if let Some(e) = &s.runs_error {
         e.clone()
     } else {
@@ -1796,15 +1827,22 @@ fn load_runs(p: &Page) {
     s.runs.clear();
     s.courses.clear();
     s.runs_error = None;
-    s.drafted = Library::open_default()
-        .and_then(|l| l.drafts())
-        .unwrap_or_default();
-    s.catalog = Library::open_default()
-        .and_then(|l| l.catalog())
-        .unwrap_or_default();
+    let opened = Library::open_default();
+    s.catalog_offline = match &opened {
+        Ok(l) => l.read_only().map(str::to_owned),
+        Err(e) => Some(format!("{e:#}")),
+    };
+    let lib = opened.as_ref().ok();
+    s.drafted = lib.and_then(|l| l.drafts().ok()).unwrap_or_default();
+    s.catalog = lib.and_then(|l| l.catalog().ok()).unwrap_or_default();
     s.rides = s.catalog.rides(&s.clips);
-    s.uses = Library::open_default()
-        .and_then(|l| Ok(library::videos::clip_uses(&l.videos()?, &l.usage()?)))
+    s.uses = lib
+        .and_then(|l| {
+            Some(library::videos::clip_uses(
+                &l.videos().ok()?,
+                &l.usage().ok()?,
+            ))
+        })
         .unwrap_or_default();
     let still_there = match &s.view {
         View::Ride(id) => s.rides.iter().any(|r| &r.id == id),

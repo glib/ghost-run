@@ -242,6 +242,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             .is_some_and(DatabaseFile::unchanged);
         if change == Change::Settings
             || change == Change::Strava
+            || change == Change::Catalog
             || (change == Change::Runs && stale)
         {
             load(&p);

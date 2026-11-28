@@ -10,6 +10,7 @@ use adw::prelude::*;
 /// bar), opened over the new Import page.
 pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::NavigationSplitView {
     let shared = crate::shared::Shared::new(window);
+    crate::catalog_ui::keep_copy();
     let pages: [(&str, &str, &str, gtk::Widget); 4] = [
         (
             "import",
@@ -141,14 +142,19 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
         _ => {}
     });
     // GHOST_RUN_PAGE=runs (etc.) opens on that page, `jobs` on the Library
-    // with the drawer open: for screenshots and testing. Otherwise the
-    // Library.
+    // with the drawer open, `settings` with the Settings dialog: for
+    // screenshots and testing. Otherwise the Library.
     let start = std::env::var("GHOST_RUN_PAGE").unwrap_or_default();
     if start == "jobs" {
         drawer.set_show_sidebar(true);
     }
     if !select(&list, &start) {
         select(&list, "library");
+    }
+    // GHOST_RUN_PAGE=settings opens the Settings dialog over the Library.
+    if start == "settings" {
+        let shared = shared.clone();
+        gtk::glib::idle_add_local_once(move || crate::settings_dialog::open(&shared));
     }
     // GHOST_RUN_CLIP=<path> opens that clip to time: for screenshots.
     if let Some(clip) = std::env::var_os("GHOST_RUN_CLIP") {

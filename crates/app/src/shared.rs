@@ -31,6 +31,9 @@ pub enum Change {
     ShowVideo,
     /// Strava was synced or disconnected (`crate::strava_ui`).
     Strava,
+    /// The catalog was shared or stopped being shared (`crate::catalog_ui`):
+    /// every page reloads from the catalog now in use.
+    Catalog,
 }
 
 /// Where runs sent to Resolve go.

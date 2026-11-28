@@ -115,7 +115,44 @@ impl Library {
             .ok()
             .and_then(|s| s.archive)
             .map(|a| a.path);
-        Self::open_in(&dir.join("library.sqlite3"), nas)
+        let path = dir.join("library.sqlite3");
+        match crate::shared::Config::load()? {
+            Some(cfg) => crate::shared::open(&cfg, &path, nas),
+            None => Self::open_in(&path, nas),
+        }
+    }
+
+    /// A library on a catalog opened elsewhere ([`crate::shared`]), with this
+    /// machine's file at `machine_file`.
+    pub(crate) fn assemble(
+        db: Db,
+        machine_file: &Path,
+        nas: Option<PathBuf>,
+        machine: String,
+    ) -> Result<Self> {
+        let local = Db::sqlite(machine_file)?;
+        create_machine_tables(&local)?;
+        Ok(Self {
+            db,
+            local,
+            nas,
+            machine,
+        })
+    }
+
+    /// Whether the catalog is shared between machines ([`crate::shared`]):
+    /// on the server, or this machine's copy of it while the server can't
+    /// be reached.
+    pub fn is_shared(&self) -> bool {
+        self.db.is_postgres() || self.db.read_only().is_some()
+    }
+
+    /// Why the catalog can't be changed now, if it can't: the shared one
+    /// can't be reached, and this is this machine's copy of it. This
+    /// machine's own part (local copies, previews, proxies, renders) still
+    /// can.
+    pub fn read_only(&self) -> Option<&str> {
+        self.db.read_only()
     }
 
     /// A library with no footage root: every clip stored by its full path.
@@ -137,7 +174,7 @@ impl Library {
         machine: String,
     ) -> Result<Self> {
         let db = Db::sqlite(path)?;
-        let conn = db.sqlite_conn();
+        let conn = db.sqlite_conn()?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
             version <= VERSION,
@@ -205,6 +242,9 @@ impl Library {
         let Some(root) = &self.nas else {
             return Ok(0);
         };
+        if self.read_only().is_some() {
+            return Ok(0);
+        }
         let mut prefix = path_text(root);
         if !prefix.ends_with('/') {
             prefix.push('/');
@@ -284,8 +324,13 @@ impl Library {
         self.clip_row(&row, state).map(Some)
     }
 
+    /// Saves a clip. While the catalog is read-only, only this machine's
+    /// part of it is saved.
     pub fn upsert(&self, clip: &Clip) -> Result<()> {
         let stored = self.stored(&clip.path);
+        if self.read_only().is_some() {
+            return self.save_state(&stored, clip);
+        }
         let info = clip.info.as_ref().map(serde_json::to_string).transpose()?;
         // Unchanged rows aren't written again: a shared catalog sees every
         // machine's scans.
@@ -360,8 +405,11 @@ impl Library {
     }
 
     /// Removes clips that aren't in `keep` (of those [`Self::clips`] lists);
-    /// returns how many went.
+    /// returns how many went. None go while the catalog is read-only.
     pub fn retain(&self, keep: &HashSet<PathBuf>) -> Result<usize> {
+        if self.read_only().is_some() {
+            return Ok(0);
+        }
         let gone: Vec<String> = self
             .clips()?
             .into_iter()
@@ -389,7 +437,7 @@ impl Library {
     /// not exist yet (SQLite's `VACUUM INTO`).
     pub fn copy_to(&self, path: &Path) -> Result<()> {
         self.db
-            .sqlite_conn()
+            .sqlite_conn()?
             .execute("VACUUM INTO ?1", [path_text(path)])
             .with_context(|| format!("copying the library to {}", path.display()))?;
         Ok(())
@@ -460,7 +508,7 @@ pub fn machine_path(library: &Path) -> PathBuf {
 }
 
 fn create_machine_tables(local: &Db) -> Result<()> {
-    let conn = local.sqlite_conn();
+    let conn = local.sqlite_conn()?;
     let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
         version <= MACHINE_VERSION,
@@ -576,7 +624,7 @@ fn move_machine_part(db: &Db, local: &Db, machine: &str) -> Result<()> {
         Ok(())
     })?;
     db.transaction(|| {
-        db.sqlite_conn().execute_batch(
+        db.sqlite_conn()?.execute_batch(
             "ALTER TABLE clips DROP COLUMN proxy_state;
              ALTER TABLE clips DROP COLUMN proxy_path;
              ALTER TABLE clips DROP COLUMN proxy_error;
@@ -586,7 +634,7 @@ fn move_machine_part(db: &Db, local: &Db, machine: &str) -> Result<()> {
              DROP TABLE renders;",
         )?;
         db.execute("UPDATE clips SET machine = $1", &[&machine])?;
-        db.sqlite_conn()
+        db.sqlite_conn()?
             .pragma_update(None, "user_version", VERSION)?;
         Ok(())
     })

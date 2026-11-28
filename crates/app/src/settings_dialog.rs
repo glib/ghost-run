@@ -219,6 +219,7 @@ pub fn open(shared: &Shared) {
         });
     });
     resolve.add(&container);
+    page.add(&crate::catalog_ui::group(shared));
     page.add(&crate::strava_ui::group(shared));
     let shared2 = shared.clone();
     dialog.connect_closed(move |_| {

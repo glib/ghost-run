@@ -38,6 +38,17 @@ jobs:
   rust:
     name: Rust (fmt, clippy, tests)
     runs-on: ubuntu-latest
+    # The shared catalog's tests (library::shared) run against a real server.
+    # 13: the oldest the resolve-db container is likely to run.
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -91,6 +102,8 @@ jobs:
       - run: cargo test --locked
         env:
           REQUIRE_FFMPEG: "1"
+          REQUIRE_POSTGRES: "1"
+          GHOST_RUN_TEST_POSTGRES: host=localhost port=5432 user=postgres password=postgres
 
   parity:
     name: Python/Rust parity

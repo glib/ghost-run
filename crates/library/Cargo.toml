@@ -7,9 +7,11 @@ description = "Ghost Run's footage library: clips found in your folders, and the
 
 [dependencies]
 anyhow.workspace = true
+bytes = "1"
 chrono.workspace = true
 ingest = { path = "../ingest" }
 libc = "0.2"
+postgres = "0.19"
 regex.workspace = true
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
