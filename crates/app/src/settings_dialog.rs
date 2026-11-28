@@ -219,6 +219,28 @@ pub fn open(shared: &Shared) {
         });
     });
     resolve.add(&container);
+    let database = adw::EntryRow::builder()
+        .title("Resolve's project database (empty: find it)")
+        .text(
+            shared
+                .settings()
+                .resolve_database
+                .clone()
+                .unwrap_or_default(),
+        )
+        .show_apply_button(true)
+        .build();
+    database.set_tooltip_text(Some(
+        "The Videos page lists Resolve's projects from its database on the shared catalog's server, read only",
+    ));
+    let shared2 = shared.clone();
+    database.connect_apply(move |row| {
+        let text = row.text().trim().to_owned();
+        let _ = shared2.update(|s| {
+            s.resolve_database = (!text.is_empty()).then_some(text);
+        });
+    });
+    resolve.add(&database);
     page.add(&crate::catalog_ui::group(shared));
     page.add(&crate::strava_ui::group(shared));
     page.add(&crate::updates::group(shared, &mut subscriptions));

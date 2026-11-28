@@ -55,6 +55,9 @@ enum Reply {
     Progress(String),
     /// What bringing back a project's footage would do, to confirm.
     Plan(Box<Found>),
+    /// Resolve's projects, read from its database (`None`: no shared
+    /// catalog to read them from), or why they couldn't be.
+    Resolve(Result<Option<crate::resolve_projects::Loaded>, String>),
 }
 
 /// The open project's files, matched to the Library.
@@ -82,6 +85,18 @@ struct State {
     clips: HashMap<String, Clip>,
     /// Lower-case clip name ([`crate::library_page::run_key`]) → its run.
     runs: HashMap<String, RunLabel>,
+    /// Resolve's projects, as last read (decision 0008).
+    resolve: Option<crate::resolve_projects::Loaded>,
+    /// Why Resolve's projects aren't listed, if they aren't.
+    resolve_note: String,
+    /// Resolve's projects are being read.
+    reading: bool,
+    /// They changed while being read: read them again after.
+    read_again: bool,
+    /// The Resolve timeline picked that isn't a video: (project, timeline).
+    picked: Option<(String, String)>,
+    /// What the search box says, in lower case.
+    search: String,
 }
 
 #[derive(Clone)]
@@ -94,6 +109,7 @@ struct Page {
     status: gtk::Label,
     link: gtk::Button,
     bring: gtk::Button,
+    note: gtk::Label,
     replies: mpsc::Sender<Reply>,
     /// Set while the list is refilled, so its selection isn't taken as a click.
     filling: Rc<std::cell::Cell<bool>>,
@@ -124,8 +140,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     body.add_css_class("content");
     body.set_vexpand(true);
     let side = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    side.set_size_request(220, -1);
+    side.set_size_request(300, -1);
     side.append(&label("Videos", "heading"));
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Find a video or Resolve project"));
+    side.append(&search);
     let list = gtk::ListBox::new();
     list.add_css_class("navigation-sidebar");
     list.update_property(&[gtk::accessible::Property::Label("Videos")]);
@@ -136,6 +155,11 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             .vexpand(true)
             .build(),
     );
+    let note = label("", "dim-label");
+    note.add_css_class("caption");
+    note.set_wrap(true);
+    note.set_visible(false);
+    side.append(&note);
     body.append(&side);
     body.append(&gtk::Separator::new(gtk::Orientation::Vertical));
 
@@ -145,7 +169,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
     empty.set_icon_name(Some("video-x-generic-symbolic"));
     empty.set_title("No videos yet");
     empty.set_description(Some(
-        "Tick clips in the Library and choose Organise → Add to video…, start one here with New video…, or link a timeline you've made by hand: open it in Resolve and press Link open timeline. For a project whose footage has moved to the NAS, open it in Resolve and press Bring back footage….",
+        "Tick clips in the Library and choose Organise → Add to video…, or start one here with New video…. Resolve's projects are listed here too once the shared catalog is connected: pick a timeline and choose Make it a video. For a project whose footage has moved to the NAS, open it in Resolve and press Bring back footage….",
     ));
     stack.add_named(&empty, Some("empty"));
     let detail = gtk::Box::new(gtk::Orientation::Vertical, 18);
@@ -178,6 +202,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         status,
         link: link.clone(),
         bring: bring.clone(),
+        note,
         replies,
         filling: Rc::default(),
     };
@@ -198,11 +223,25 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         if p.filling.get() {
             return;
         }
-        let Some(id) = row.and_then(|r| r.widget_name().parse().ok()) else {
+        let Some(name) = row.map(|r| r.widget_name().to_string()) else {
             return;
         };
-        p.state.borrow_mut().selected = Some(id);
+        if let Some(rest) = name.strip_prefix("r\t") {
+            let (project, timeline) = rest.split_once('\t').unwrap_or((rest, ""));
+            p.state.borrow_mut().picked = Some((project.to_owned(), timeline.to_owned()));
+        } else if let Ok(id) = name.parse() {
+            let mut s = p.state.borrow_mut();
+            s.selected = Some(id);
+            s.picked = None;
+        } else {
+            return;
+        }
         show(&p);
+    });
+    let p = page.clone();
+    search.connect_search_changed(move |entry| {
+        p.state.borrow_mut().search = entry.text().to_lowercase();
+        fill_list(&p);
     });
     let p = page.clone();
     new.connect_clicked(move |_| new_video_dialog(&p));
@@ -215,7 +254,10 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         }
         Change::ShowVideo => {
             if let Some(id) = p.shared.take_video_to_show() {
-                p.state.borrow_mut().selected = Some(id);
+                let mut s = p.state.borrow_mut();
+                s.selected = Some(id);
+                s.picked = None;
+                drop(s);
                 load(&p);
             }
         }
@@ -260,6 +302,41 @@ fn load(p: &Page) {
     drop(s);
     fill_list(p);
     show(p);
+    read_resolve(p);
+}
+
+/// Reads Resolve's projects from its database on a thread (decision 0008);
+/// the reply refills the list.
+fn read_resolve(p: &Page) {
+    let mut s = p.state.borrow_mut();
+    if s.reading {
+        s.read_again = true;
+        return;
+    }
+    s.reading = true;
+    drop(s);
+    let database = p.shared.settings().resolve_database.clone();
+    let tx = p.replies.clone();
+    std::thread::spawn(move || {
+        let roots = crate::library_page::roots();
+        let read = crate::resolve_projects::rows(database.as_deref(), &roots)
+            .map_err(|e| format!("Resolve's projects couldn't be read: {e:#}"));
+        let _ = tx.send(Reply::Resolve(read));
+    });
+}
+
+/// Whether a list row's text matches the search box.
+fn matches(search: &str, texts: &[&str]) -> bool {
+    search.is_empty() || texts.iter().any(|t| t.to_lowercase().contains(search))
+}
+
+/// The Resolve timeline linked to `video`, if Resolve's projects were read.
+fn row_of(s: &State, video: i64) -> Option<&crate::resolve_projects::Row> {
+    s.resolve
+        .as_ref()?
+        .rows
+        .iter()
+        .find(|r| r.video == Some(video))
 }
 
 /// Each committed run by its clip's name ([`crate::library_page::run_key`]).
@@ -299,6 +376,16 @@ fn fill_list(p: &Page) {
         p.list.remove(&row);
     }
     for v in &s.videos {
+        if !matches(
+            &s.search,
+            &[
+                &v.title,
+                v.project.as_deref().unwrap_or_default(),
+                v.timeline.as_deref().unwrap_or_default(),
+            ],
+        ) {
+            continue;
+        }
         let line = gtk::Box::new(gtk::Orientation::Vertical, 2);
         let title = label(&v.title, "");
         title.set_ellipsize(gtk::pango::EllipsizeMode::End);
@@ -314,6 +401,9 @@ fn fill_list(p: &Page) {
                 if let Some(kind) = s.kinds.get(&v.kind) {
                     text = format!("{kind} · {text}");
                 }
+                if let Some(row) = row_of(&s, v.id).filter(|_| v.status != Status::Published) {
+                    text = format!("{text} · {}", row.footage.text());
+                }
                 text
             },
             "dim-label",
@@ -325,10 +415,56 @@ fn fill_list(p: &Page) {
         row.set_widget_name(&v.id.to_string());
         row.set_tooltip_text(Some(&v.title));
         p.list.append(&row);
-        if s.selected == Some(v.id) {
+        if s.selected == Some(v.id) && s.picked.is_none() {
             p.list.select_row(Some(&row));
         }
     }
+    let unlinked: Vec<&crate::resolve_projects::Row> = s
+        .resolve
+        .iter()
+        .flat_map(|r| &r.rows)
+        .filter(|r| r.video.is_none() && matches(&s.search, &[&r.project, &r.timeline]))
+        .collect();
+    if !unlinked.is_empty() {
+        let heading = gtk::ListBoxRow::new();
+        heading.set_selectable(false);
+        heading.set_activatable(false);
+        let text = label("In Resolve, not videos yet", "heading");
+        text.set_margin_top(12);
+        heading.set_child(Some(&text));
+        p.list.append(&heading);
+    }
+    for r in unlinked {
+        let line = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        let title = label(&r.timeline, "");
+        title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        line.append(&title);
+        let sub = label(
+            &[
+                r.project.clone(),
+                crate::resolve_projects::when(r.modified),
+                r.footage.text(),
+            ]
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · "),
+            "dim-label",
+        );
+        sub.add_css_class("caption");
+        sub.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        line.append(&sub);
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&line));
+        row.set_widget_name(&format!("r\t{}\t{}", r.project, r.timeline));
+        row.set_tooltip_text(Some(&format!("{} in {}", r.timeline, r.project)));
+        p.list.append(&row);
+        if s.picked.as_ref() == Some(&(r.project.clone(), r.timeline.clone())) {
+            p.list.select_row(Some(&row));
+        }
+    }
+    p.note.set_text(&s.resolve_note);
+    p.note.set_visible(!s.resolve_note.is_empty());
     p.filling.set(false);
 }
 
@@ -367,6 +503,22 @@ fn show(p: &Page) {
         p.detail.remove(&w);
     }
     let s = p.state.borrow();
+    if let Some((project, timeline)) = s.picked.clone() {
+        let row = s
+            .resolve
+            .iter()
+            .flat_map(|r| &r.rows)
+            .find(|r| r.project == project && r.timeline == timeline)
+            .cloned();
+        drop(s);
+        if let Some(row) = row {
+            p.stack.set_visible_child_name("detail");
+            show_timeline(p, &row);
+            return;
+        }
+        p.state.borrow_mut().picked = None;
+        return show(p);
+    }
     let Some(video) = s.videos.iter().find(|v| Some(v.id) == s.selected).cloned() else {
         p.stack.set_visible_child_name("empty");
         return;
@@ -449,6 +601,15 @@ fn show(p: &Page) {
         ),
         _ => "Not built yet".to_owned(),
     }));
+    if let Some(row) = row_of(&s, video.id) {
+        resolve.set_subtitle(&glib_escape(&format!(
+            "Project {}, timeline {} · {used} {} on it · {}",
+            row.project,
+            row.timeline,
+            if used == 1 { "clip" } else { "clips" },
+            row.footage.text()
+        )));
+    }
     if video.project.is_some() {
         let read = gtk::Button::with_label("Read back");
         read.set_valign(gtk::Align::Center);
@@ -664,11 +825,47 @@ fn handle(p: &Page, reply: Reply) {
         p.status.set_text(text);
         return;
     }
+    if let Reply::Resolve(read) = reply {
+        let mut s = p.state.borrow_mut();
+        s.reading = false;
+        let again = std::mem::take(&mut s.read_again);
+        let mut updated = 0;
+        match read {
+            Ok(Some(loaded)) => {
+                updated = loaded.updated;
+                s.resolve_note.clear();
+                // With no videos yet, show the newest timeline rather than
+                // an empty page.
+                if s.selected.is_none() && s.picked.is_none() {
+                    s.picked = loaded
+                        .rows
+                        .iter()
+                        .find(|r| r.video.is_none())
+                        .map(|r| (r.project.clone(), r.timeline.clone()));
+                }
+                s.resolve = Some(loaded);
+            }
+            Ok(None) => s.resolve_note = crate::resolve_projects::NOT_SET_UP.into(),
+            // Keep what was read last; say why it isn't fresh.
+            Err(e) => s.resolve_note = e,
+        }
+        drop(s);
+        if updated > 0 {
+            // Usage read from the timelines: the Library's views too.
+            p.shared.videos_changed();
+        } else if again {
+            read_resolve(p);
+        } else {
+            fill_list(p);
+            show(p);
+        }
+        return;
+    }
     p.state.borrow_mut().busy = false;
     p.link.set_sensitive(true);
     p.bring.set_sensitive(true);
     match reply {
-        Reply::Progress(_) => {}
+        Reply::Progress(_) | Reply::Resolve(_) => {}
         Reply::Plan(found) => {
             p.status.set_text("");
             show(p);
@@ -678,7 +875,9 @@ fn handle(p: &Page, reply: Reply) {
         Reply::Done(text) => p.status.set_text(&text),
         Reply::Linked(id, text) => {
             p.status.set_text(&text);
-            p.state.borrow_mut().selected = Some(id);
+            let mut s = p.state.borrow_mut();
+            s.selected = Some(id);
+            s.picked = None;
         }
         Reply::Error(text) => p.status.set_text(&text),
         Reply::Freeable(clips, note) => {
@@ -849,10 +1048,11 @@ fn offer_to_free(p: &Page, clips: Vec<Clip>, note: String) {
         p2.status.set_text("Removing local copies…");
         let tx = p2.replies.clone();
         std::thread::spawn(move || {
+            let (clips, kept) = crate::resolve_projects::guard(clips, &roots);
             let reply = match Library::open_default() {
-                Ok(l) => {
-                    Reply::Done(library::hydrate::remove_local_copies(&l, &clips, &roots).text())
-                }
+                Ok(l) => Reply::Done(
+                    library::hydrate::remove_local_copies(&l, &clips, &roots).text() + &kept,
+                ),
                 Err(e) => Reply::Error(format!("Not removed: {e:#}")),
             };
             let _ = tx.send(reply);
@@ -878,8 +1078,14 @@ fn link_open_timeline(p: &Page) {
 /// the one already linked to it up to date); its id and a sentence.
 fn link_timeline(bridge: &crate::resolve::Bridge) -> Result<(i64, String)> {
     let (project, timeline, found) = read_timeline(bridge, None, None)?;
+    link_found(&project, &timeline, &found)
+}
+
+/// Links `timeline` in `project`, which uses `found`, as a video.
+fn link_found(project: &str, timeline: &str, found: &[OnTimeline]) -> Result<(i64, String)> {
+    let (project, timeline) = (project.to_owned(), timeline.to_owned());
     let library = Library::open_default()?;
-    let (items, missing) = library::videos::match_timeline(&library.clips()?, &found);
+    let (items, missing) = library::videos::match_timeline(&library.clips()?, found);
     let existing = library.videos()?.into_iter().find(|v| {
         v.project.as_deref() == Some(project.as_str())
             && v.timeline.as_deref() == Some(timeline.as_str())
@@ -1551,6 +1757,69 @@ fn item_text(item: &Item, clip: Option<&Clip>, run: Option<&RunLabel>) -> String
 }
 
 /// Row titles and subtitles are markup.
+/// A Resolve timeline that isn't a video yet: what it uses and how much of
+/// that is here, and Make it a video.
+fn show_timeline(p: &Page, row: &crate::resolve_projects::Row) {
+    let s = p.state.borrow();
+    let about = adw::PreferencesGroup::new();
+    about.set_title(&glib_escape(&row.timeline));
+    about.set_description(Some(&glib_escape(&format!(
+        "A timeline in the Resolve project {}, last saved {}. Make it a video to give it a status and a YouTube link, and so its clips count as used.",
+        row.project,
+        crate::resolve_projects::when(row.modified)
+    ))));
+    let f = &row.footage;
+    let footage = adw::ActionRow::new();
+    footage.set_title("Footage");
+    footage.set_subtitle(&glib_escape(&format!(
+        "{} {} · {}",
+        f.files,
+        if f.files == 1 { "file" } else { "files" },
+        f.text()
+    )));
+    about.add(&footage);
+    for away in &row.away {
+        let line = adw::ActionRow::new();
+        line.set_title(&glib_escape(away));
+        line.add_css_class("dim-label");
+        about.add(&line);
+    }
+    p.detail.append(&about);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    actions.set_halign(gtk::Align::End);
+    let make = gtk::Button::with_label("Make it a video");
+    make.add_css_class("suggested-action");
+    make.set_sensitive(!s.busy);
+    make.set_tooltip_text(Some(
+        "Add it to Videos, with the clips it uses from the Library",
+    ));
+    actions.append(&make);
+    p.detail.append(&actions);
+    let found: Vec<OnTimeline> = s
+        .resolve
+        .iter()
+        .flat_map(|r| &r.projects)
+        .filter(|pr| pr.name == row.project)
+        .flat_map(|pr| &pr.timelines)
+        .find(|t| t.name == row.timeline)
+        .map(|t| t.on_timeline())
+        .unwrap_or_default();
+    drop(s);
+    let (pp, project, timeline) = (p.clone(), row.project.clone(), row.timeline.clone());
+    make.connect_clicked(move |_| match link_found(&project, &timeline, &found) {
+        Ok((id, text)) => {
+            pp.status.set_text(&text);
+            let mut s = pp.state.borrow_mut();
+            s.selected = Some(id);
+            s.picked = None;
+            drop(s);
+            pp.shared.videos_changed();
+        }
+        Err(e) => pp.status.set_text(&format!("Not made: {e:#}")),
+    });
+}
+
 fn glib_escape(text: &str) -> String {
     gtk::glib::markup_escape_text(text).to_string()
 }

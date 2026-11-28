@@ -24,6 +24,9 @@ pub struct AppSettings {
     pub ghost: bool,
     /// The Distrobox DaVinci Resolve is installed in (default `davincibox`).
     pub resolve_container: Option<String>,
+    /// Resolve's project database on the shared catalog's server (decision
+    /// 0008; empty: the only one Ghost Run may read).
+    pub resolve_database: Option<String>,
     /// Past this many GB of local copies of NAS clips, the Library suggests
     /// removing some (default [`LOCAL_COPIES_GB`]).
     pub local_copies_gb: Option<u32>,
@@ -155,6 +158,7 @@ mod tests {
             comparison: Comparison::Optimal,
             ghost: true,
             resolve_container: Some("resolve".into()),
+            resolve_database: Some("Projects".into()),
             local_copies_gb: Some(80),
             kinds_folder: Some("/home/x/kinds".into()),
             brand_kit: Some("/home/x/brand/brand.toml".into()),
