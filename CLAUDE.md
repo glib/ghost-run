@@ -4,25 +4,20 @@ Self lap timing for mountain-bike racing: Start/S1…/Finish markers on a clip g
 sector and lap times, compared against earlier runs (best lap, optimal lap) and
 shown as a video overlay. One user (Liam), public repo, no deploy, Linux only.
 
-It is becoming one GTK4/libadwaita desktop app, `ghost-run`
-(`docs/decisions/0003-one-app-ghost-run.md` has the plan and the order of PRs):
-Import (the merged resolve-ingest app), Library, Runs, Markers, Output/Resolve.
-What comes next is `docs/decisions/0005-workspaces-and-hydrated-footage.md`
-(issues #32–#38): workspaces per job (Inbox, Library, Videos, Tracks), the
-originals kept only on the NAS with a local catalog, footage hydrated per
-video, video kinds as templates, usage tracking, Strava. It's done in three stages (A: footage on the NAS and catalogued, the new import; B: Videos, Library organising, the first two kinds; C: the other kinds with Features and captions, overlay styles, Strava), tracked as GitHub milestones.
-The timing workflow is still a Python script inside DaVinci Resolve Studio. It is moving to a
-standalone Rust tool (`docs/decisions/0001-standalone-rust-tool.md`): an overlay
-rendered to one transparent video file, then markers found automatically from
-the video. The Python script stays usable, bug fixes only, until Rust covers the
-workflow.
+One GTK4/libadwaita desktop app, `ghost-run` (decisions in `docs/decisions/`:
+0003 one app; 0005 workspaces Inbox/Library/Videos/Tracks, originals only on the
+NAS with a local catalog, footage hydrated per video, kinds, usage, Strava;
+0007 the shared catalog in Postgres; 0008 Ghost Run as where Resolve projects
+are opened from, reading Resolve's project database), plus the `rtimer` CLI.
+The Python script that ran inside Resolve was retired in 0008; the Rust code
+still reads and writes its `timer_db.yaml` exactly as it did.
 
 ## Commands
 - `make install` — builds and installs `ghost-run` + `rtimer` to `~/.local/bin` with a launcher and icon (`Exec` goes through `distrobox enter $CONTAINER_ID` when built in a distrobox).
 - `cargo test` — Rust tests (the app needs `libgtk-4-dev libadwaita-1-dev`; the shared catalog's tests need a Postgres server: `docker run -d -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:55432:5432 postgres:13` and `GHOST_RUN_TEST_POSTGRES="host=127.0.0.1 port=55432 user=postgres password=postgres"`, else they're skipped (CI sets `REQUIRE_POSTGRES` and a service container); screenshots under `xvfb-run` with `GSK_RENDERER=cairo` and a throwaway `XDG_CONFIG_HOME`/`XDG_DATA_HOME`). Before pushing: `cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test`.
-- `cargo build -p timer-cli && scripts/parity.sh` — runs the Python and Rust CLIs on `examples/` and `tests/fixtures/` databases and fails on any difference in output or in the files they write.
-- `python -m unittest discover -s tests` — Python tests (needs `PyYAML`, `Pillow`: `pip install -r requirements-resolve.txt`). The devbox has no pip: unpack the two wheels from PyPI into a temp dir and set `PYTHONPATH` to it.
-- CI (`.github/workflows/ci.yml`, GitHub-hosted runners) runs Python 3.10 and 3.13 tests, Rust fmt/clippy/tests, the parity check and the release build in Fedora; on `main` it then releases (`docs/releasing.md`). CI is the gate.
+- `scripts/golden.sh --check` (also run by `cargo test`, `crates/timer-cli/tests/golden.rs`) — `rtimer`'s database and overlay commands on the `examples/` and `tests/fixtures/` databases against `tests/fixtures/golden.txt`, recorded when they matched the retired Python CLI byte for byte; `--update` only for a deliberate output change.
+- `python -m unittest discover -s tests` — tests for the Resolve bridge, `release.py` and `edit_check.py` (stdlib only).
+- CI (`.github/workflows/ci.yml`, GitHub-hosted runners) runs Python 3.10 and 3.13 tests (the bridge runs in Resolve's Python), Rust fmt/clippy/tests (with the golden check) and the release build in Fedora; on `main` it then releases (`docs/releasing.md`). CI is the gate.
 - `python3 scripts/release.py check-title "feat: ..."` — checks a PR title and says what it bumps; `scripts/release.py next` — the version `main` would release now.
 
 ## Shipping a change
@@ -39,7 +34,7 @@ sensible option and list assumptions in the PR description.
 
 1. **Branch** off fresh `origin/main` (a worktree, or a branch in your own clone). Never commit to `main`.
 2. **Build** with tests. Run the tests you touch while working; the full suite before pushing.
-3. **PR:** commit, `git push -u origin HEAD`, `gh pr create` (what changed, assumptions, how it was tested). **The title is a Conventional Commit subject and sets the next version** (`docs/releasing.md`): `feat: ...` new capability (minor), `fix: ...` a bug (patch), `feat!:`/`fix!:` breaking: older builds or the Python script can't read what it writes, or something is removed or needs doing by hand (major, and say what in the description); `docs`/`test`/`ci`/`build`/`chore`/`style`/`refactor` release nothing. Never edit version numbers.
+3. **PR:** commit, `git push -u origin HEAD`, `gh pr create` (what changed, assumptions, how it was tested). **The title is a Conventional Commit subject and sets the next version** (`docs/releasing.md`): `feat: ...` new capability (minor), `fix: ...` a bug (patch), `feat!:`/`fix!:` breaking: older builds can't read what it writes, or something is removed or needs doing by hand (major, and say what in the description); `docs`/`test`/`ci`/`build`/`chore`/`style`/`refactor` release nothing. Never edit version numbers.
 4. **Watch CI:** `gh pr checks <N> --watch`, on its own. Never pipe it or chain the merge after it with `&&`.
 5. **Red:** `gh run view <run-id> --log-failed`, fix, push, watch again. Flaky: rerun the failed jobs once and open an issue. After three failed fixes, or if the fix needs a decision, stop and report.
 6. **Green:** if `main` moved on, merge `origin/main` in and watch again. Then `gh pr merge <N> --squash --delete-branch`. Never merge a red or pending PR.
@@ -53,27 +48,24 @@ sensible option and list assumptions in the PR description.
 - `crates/ingest/` — import core, merged from `glib/resolve-ingest` with its history (MIT, its own `LICENSE`): discovery, verified CIFS archive copies (`layout.rs`: `YYYY/YYYY-MM-DD/<camera name>`, numbered folder on a clash; older batches used `DATE/UUID/originals`), PCM editing MOVs, SQLite journal, child-process supervision. Settings/journal live in `~/.config/ghost-run/import` and `~/.local/share/ghost-run/import`; `settings::move_from_resolve_ingest` (called first in `main`) moves the old `resolve-ingest` folders there once. ffmpeg is looked up in `GHOST_RUN_FFMPEG_DIR`, `libexec/ghost-run`, then the old resolve-ingest names. Docs and validation evidence: `docs/ingest/`.
 - Releases and updates (`docs/releasing.md`, decision 0006): `scripts/release.py` (next version from Conventional Commits since the last `vX.Y.Z` tag, release notes, PR title check; tested in `tests/test_release.py`), `crates/app/build.rs` (`GHOST_RUN_VERSION`: CI's, else from `git describe`), `library::update` (latest release from GitHub, download + `SHA256SUMS` check, unpack, `try_run` the new `--version`, rename over the installed binaries; `GHOST_RUN_UPDATES=<base url>` for a stand-in), `crates/app/src/updates.rs` (check 5 s after start and every 6 h, the banner over the pages, Update…/Restart…, Settings → Updates: ask (default), automatic (release builds only), off).
 - `packaging/` — launcher `.desktop` (`@EXEC@` filled in by the Makefile) and icon.
-- `crates/timer-core/` — Rust core: `models` (courses, runs), `database` (YAML v2 load/save; `yaml.rs` writes PyYAML's exact layout and quoting), `capture_time`, `markers`, `timing`, `matching` (clip → stored run; the fingerprint hash matches Python's byte for byte), `stats` (best/optimal lap), `validation`, `py` (Python-compatible coercions, `repr`, JSON escaping, half-even rounding).
+- `crates/timer-core/` — Rust core: `models` (courses, runs), `database` (YAML v2 load/save; `yaml.rs` writes PyYAML's exact layout and quoting, as the retired Python tool did, so files diff cleanly), `capture_time`, `markers`, `timing`, `matching` (clip → stored run; the fingerprint hash matches Python's byte for byte), `stats` (best/optimal lap), `validation`, `py` (Python-compatible coercions, `repr`, JSON escaping, half-even rounding).
 - `crates/timer-core/src/board.rs` (a course's leaderboard: ranks, sectors, fastest, why a run doesn't count), `edit.rs` (batch edits that apply whole or not at all; moving runs needs the same sector count), `file.rs` (`DatabaseFile`: saves only if the file is unchanged since loading, never into a newly invalid database, with a timestamped backup in `<name>.backups/`, 20 kept) — what the app's Tracks page uses; `tracks.rs` (courses ridden most in the last 56 days, PB history with each new best, sector gaps: the latest 5 counted runs' mean against each sector's fastest). `commit.rs` (markers → a committed run, ids and fields as the Python tool writes them; updates the clip's existing run) and `preview.rs` (partial timing while markers are placed, against the course's best) are the Time page's.
 - `crates/timer-core/src/overlay.rs` — what the overlay shows for a clip (`overlay_payload`: compared only with runs captured before it, never its own stored run), its rows, text and delta colours.
 - `crates/timer-render/src/job.rs` — rendering a run's overlay file (frame range, split across ffmpeg processes per `encode::plan`, joined, the clip's timecode; written to a hidden `.<name>.partial.mov` and renamed), with progress and cancel: shared by `rtimer render` and the jobs drawer.
 - `crates/timer-render/` — draws overlay frames (the Fusion comp's layout and colours, minus the panel blur, which a separate file can't do; bundled JetBrains Mono, OFL; `Style::ghost` adds a live GHOST row under the timer, the gap to the comparison from `OverlayPayload::ghost_gap` (the comparison ridden at an even pace within each sector), switched on by the jobs drawer's Ghost box (`AppSettings::ghost`; a ghost render's fingerprint is the run's plus `+ghost`, so switching re-renders)) and encodes them with ffmpeg: only the panel is drawn and piped, and ffmpeg pads it to the full transparent frame (`Output::region`); ProRes 4444 with alpha (`prores_aw`, ~4x faster than `prores_ks`; ffmpeg's pad step is single-threaded at ~90 fps at 4K, so `encode::plan` splits a render across ffmpeg processes, each encoding a stretch, joined losslessly by `concat`; processes × threads are planned to fit half the free memory (~660 MB a process + ~230 MB a thread at 4K): unplanned parallel ffmpegs once ran the 8 GB devbox out of memory. Never test heavy renders there without a memory watchdog) carrying the clip's timecode, or an image sequence numbered by clip frame.
 - `crates/timer-align/` — places a clip's markers from a reference run (`auto-markers`): frames read at 64×36 grey through ffmpeg (`video.rs`, cached by path/size/mtime), coarse subsequence DTW at ~10 samples/s (speed ratio limited to 3×; the path with the lowest *mean* cost, found exactly by repeated passes, so a rider stopping mid-run doesn't make it skip half the run), then per-marker refinement on full-rate frames with a confidence. Tested on made-up "trail" footage (a pan over random texture); no real footage in the repo.
-- `crates/timer-cli/` — `rtimer`: the Python CLI's database and overlay commands (`courses`, `runs`, `stats`, `validate-db`, `normalize-db`, `overlay-payload`, `overlay-text`) with identical arguments and output, plus `render` and `auto-markers` (Rust only). `tests/render.rs` and `tests/auto_markers.rs` need ffmpeg: they skip without it locally, and fail in CI (`REQUIRE_FFMPEG`).
-- `tests/fixtures/` — made-up databases and marker CSVs for the parity check.
-- `src/resolve_timer/` — Python package. Resolve-free core: `timing.py`, `database.py` (YAML, schema v2), `matching.py`, `stats.py`, `markers.py`, `models.py`, `validation.py`, `service.py`, `cli.py`, `summary_card.py`. Resolve-only: `resolve_adapter.py`, `ui.py`, `ui_controller.py`, `runtime_support.py`, and the Fusion part of `overlay.py`.
-- `scripts/` — Resolve launcher and installers (Linux davincibox, Windows).
+- `crates/timer-cli/` — `rtimer`: the retired Python CLI's database and overlay commands (`courses`, `runs`, `stats`, `validate-db`, `normalize-db`, `overlay-payload`, `overlay-text`) with identical arguments and output, plus `render` and `auto-markers` (Rust only). `tests/render.rs` and `tests/auto_markers.rs` need ffmpeg: they skip without it locally, and fail in CI (`REQUIRE_FFMPEG`).
+- `tests/fixtures/` — made-up databases and marker CSVs, and `golden.txt` (`scripts/golden.sh`).
 - `scripts/catalog-db-setup.sh` — run once as root on the Postgres server (resolve-db, LXC 106): makes the `ghost_run` role (new random password each run) and database, puts a LAN `pg_hba` line first (backup kept), lets the role read (CONNECT/USAGE/SELECT, default privileges too) every Resolve project database (one with `SM_Project`) and prints whether the columns `resolve_db` reads are there, reloads, prints what to type into Settings. `--resolve` does only the Resolve part, keeping the password.
 - `scripts/edit_check.py` — writes a test edit (labelled clips; FCPXML 1.9 and OTIO) to import into Resolve and see whether dissolves, the fade, V2 alpha clips and timecoded sources survive: step 1 of the first-edit plan (`docs/decisions/0004-first-edit-and-thumbnails.md`). Stdlib only; tested in `tests/test_edit_check.py`.
-- `tests/` — unittest; Resolve is faked, so everything runs without it.
+- `tests/` — unittest for the bridge (Resolve faked), `release.py` and `edit_check.py`.
 - `examples/` — example database and markers CSV (made-up runs).
 - `docs/decisions/` — short ADRs for significant choices. Add one when you make one.
 - `docs/agents/` — prompts for one-off jobs Liam runs with a Claude agent on the desktop (which has the NAS and real footage): `tidy-footage.md` sorts the NAS share into the footage layout and clears local copies already on the NAS.
-- `PLAN.md` — the original design and status of the Python tool.
 
 ## Conventions
-- **The YAML database is the contract** between the Python and Rust tools: schema version 2, same field names and meaning. Never break existing databases; a schema change needs a migration and a version bump.
-- **Parity:** while both tools implement a command, `scripts/parity.sh` must stay green. Porting a command means adding it to `rtimer` and to the script. Python quirks are matched on purpose (PyYAML 1.1 quoting, `round()` half to even, `str()`/`int()`/`bool()` coercions); where Rust deliberately differs (it rejects a NaN frame rate), say so in a comment.
+- **The YAML database is a contract** with every `timer_db.yaml` already written: schema version 2, same field names and meaning. Never break existing databases; a schema change needs a migration and a version bump.
+- **Golden outputs:** `rtimer`'s outputs stay as `tests/fixtures/golden.txt` records them. The Python quirks it matched (PyYAML 1.1 quoting, `round()` half to even, `str()`/`int()`/`bool()` coercions) stay, so existing databases are written the same way; a deliberate change updates the golden file and says why in the PR.
 - Timing is frame-based: `seconds = frame_delta / source_fps`, using the source clip's frame rate.
 - No real footage or personal databases in the repo (`timer_db.yaml` is gitignored). Test fixtures are made up or tiny generated clips.
 - **Loose ends go in GitHub issues** (`gh issue create`), referenced from the PR.

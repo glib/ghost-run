@@ -1,9 +1,11 @@
 //! Run timing for Resolve Timer: courses, runs and the YAML database they live
-//! in (schema v2, shared with the Python tool), sector/lap timing, matching a
-//! clip to its stored run, and course statistics (best and optimal laps).
+//! in (schema v2), sector/lap timing, matching a clip to its stored run, and
+//! course statistics (best and optimal laps).
 //!
-//! Behaviour follows the Python implementation in `src/resolve_timer/` exactly;
-//! `scripts/parity.sh` checks the two CLIs give the same output.
+//! It was ported from the Python tool (retired in decision 0008) to behave
+//! exactly the same, PyYAML's file layout and Python's rounding included, so
+//! existing databases read and write as before. `scripts/golden.sh` holds the
+//! CLI to the outputs recorded when the two last matched.
 
 pub mod board;
 pub mod capture_time;

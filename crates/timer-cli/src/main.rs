@@ -1,5 +1,7 @@
-//! `rtimer`: the run-database commands of the Python `resolve-timer` CLI, with
-//! the same arguments and output, so the two can be compared (`scripts/parity.sh`).
+//! `rtimer`: the run-database and overlay commands (ported from the retired
+//! Python `resolve-timer` CLI with the same arguments and output, which
+//! `tests/fixtures/golden.txt` still holds them to: `scripts/golden.sh`), plus
+//! `render` and `auto-markers`.
 
 mod auto_markers;
 mod render;
