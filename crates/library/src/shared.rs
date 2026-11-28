@@ -640,9 +640,10 @@ static COPYING: Mutex<()> = Mutex::new(());
 
 /// Makes `path` (`library.sqlite3`) a copy of the shared catalog, if it has
 /// changed since the last copy this run made (always with `force`).
-/// Returns whether it copied. The copy is made beside it and renamed over
-/// it, with no SQLite journal left behind, so a reader never sees half of
-/// one; it's an ordinary library, read-only only while it's opened as the
+/// Returns whether it copied. The copy is made beside it, then written into
+/// `path` in one transaction by SQLite's online backup, so the app's open
+/// connections to it can stay open and a reader never sees half of one;
+/// it's an ordinary library, read-only only while it's opened as the
 /// stand-in.
 pub fn refresh_copy(cfg: &Config, path: &Path, force: bool) -> Result<bool> {
     let _one = COPYING.lock().unwrap_or_else(|e| e.into_inner());
@@ -677,9 +678,9 @@ pub fn refresh_copy(cfg: &Config, path: &Path, force: bool) -> Result<bool> {
         copy.batch("PRAGMA journal_mode=DELETE")?;
         copy.transaction(|| copy_tables(&shared, &copy))?;
         drop(copy);
-        std::fs::File::open(&tmp)?.sync_all()?;
-        settle_journal(path)?;
-        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+        let written = write_over(&tmp, path);
+        remove_sqlite(&tmp);
+        written.with_context(|| format!("writing the copy into {}", path.display()))?;
         *COPIED_AT.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, changes));
         Ok(true)
     })();
@@ -696,18 +697,57 @@ fn remove_sqlite(path: &Path) {
     }
 }
 
-/// Folds a library's write-ahead log back in and switches it to a plain
-/// journal, so the file can be renamed or replaced on its own.
-fn settle_journal(path: &Path) -> Result<()> {
-    let mut wal = path.as_os_str().to_owned();
-    wal.push("-wal");
-    if !path.is_file() || !Path::new(&wal).exists() {
-        return Ok(());
+/// How long writing the copy waits for the app's own writes to `path`.
+const WRITE_WAIT: Duration = Duration::from_secs(30);
+
+/// Replaces everything in the SQLite database `to` with `from`'s, in one
+/// write transaction (SQLite's online backup). Other connections to `to`
+/// may stay open, as the app's do: they wait for it like for any write, and
+/// see the new contents after. Never renames or removes `to` or its
+/// journals, which would pull them out from under those connections.
+fn write_over(from: &Path, to: &Path) -> Result<()> {
+    use rusqlite::backup::{Backup, StepResult};
+    let page_size = |c: &rusqlite::Connection| -> Result<i64> {
+        Ok(c.query_row("PRAGMA page_size", [], |r| r.get(0))?)
+    };
+    let mut dst = rusqlite::Connection::open(to)?;
+    dst.busy_timeout(WRITE_WAIT)?;
+    {
+        // A backup into a WAL database needs the same page size.
+        let src = rusqlite::Connection::open(from)?;
+        let want = page_size(&dst)?;
+        if page_size(&src)? != want {
+            src.execute_batch(&format!("PRAGMA page_size = {want}; VACUUM;"))?;
+        }
     }
-    let conn = rusqlite::Connection::open(path)?;
-    conn.busy_timeout(Duration::from_secs(10))?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")
-        .with_context(|| format!("closing {}'s journal (is it in use?)", path.display()))?;
+    let src =
+        rusqlite::Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let backup = Backup::new(&src, &mut dst)?;
+    let until = std::time::Instant::now() + WRITE_WAIT;
+    loop {
+        match backup.step(-1)? {
+            StepResult::Done => return Ok(()),
+            StepResult::More => {}
+            _ => {
+                ensure!(
+                    std::time::Instant::now() < until,
+                    "it stayed busy for {} s (is a scan writing to it?)",
+                    WRITE_WAIT.as_secs()
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+/// Keeps a copy of the SQLite database `path` at `to` (`VACUUM INTO`, one
+/// read transaction: the app's connections to `path` may stay open).
+fn keep_copy_of(path: &Path, to: &Path) -> Result<()> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.busy_timeout(WRITE_WAIT)?;
+    conn.execute("VACUUM INTO ?1", [to.to_string_lossy()])
+        .with_context(|| format!("copying {} to {}", path.display(), to.display()))?;
     Ok(())
 }
 
@@ -723,9 +763,12 @@ pub enum Started {
 
 /// Starts sharing: fills the shared catalog from this machine's own if
 /// `copy_in` (it must be empty), else uses what's there (it must have been
-/// filled), putting this machine's own catalog aside as
+/// filled), keeping a copy of this machine's own catalog as
 /// `library-before-shared-<date>.sqlite3`. Then saves the config and makes
-/// this machine's copy. `path` is `library.sqlite3`.
+/// this machine's copy in `library.sqlite3` (`path`). Nothing here needs the
+/// app to close its own connections to `path`. Once the shared catalog is
+/// filled or joined, the config is saved even if making the copy fails: the
+/// copy is made again within [`refresh_copy`]'s next round.
 pub fn start(
     cfg: &Config,
     path: &Path,
@@ -751,7 +794,6 @@ pub fn start(
             "the shared catalog is empty: fill it from this machine's catalog instead"
         );
         let aside = if path.is_file() {
-            settle_journal(path)?;
             let today = chrono::Local::now().format("%Y-%m-%d");
             let mut aside = path.with_file_name(format!("library-before-shared-{today}.sqlite3"));
             let mut n = 2;
@@ -759,7 +801,7 @@ pub fn start(
                 aside = path.with_file_name(format!("library-before-shared-{today}-{n}.sqlite3"));
                 n += 1;
             }
-            std::fs::rename(path, &aside)?;
+            keep_copy_of(path, &aside)?;
             Some(aside)
         } else {
             None
@@ -767,8 +809,10 @@ pub fn start(
         Started::Joined(aside)
     };
     *DOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    refresh_copy(cfg, path, true)?;
     cfg.save_to(config_file)?;
+    if let Err(e) = refresh_copy(cfg, path, true) {
+        eprintln!("Shared catalog: this machine's copy wasn't made yet: {e:#}");
+    }
     Ok(started)
 }
 
@@ -945,7 +989,6 @@ mod tests {
             own.upsert(&clip("/v/a.mp4", "2026-08-01 10:00:00"))
                 .unwrap();
         }
-        settle_journal(&path).unwrap();
         let lib = open(&cfg, &path, None).unwrap();
         assert!(lib.read_only().unwrap().contains("read-only"));
         assert_eq!(lib.clips().unwrap().len(), 1);
@@ -1150,6 +1193,13 @@ mod tests {
         }
         let desk_cfg_file = desk_dir.join("shared-catalog.json");
         let laptop_cfg_file = laptop_dir.join("shared-catalog.json");
+        // The app has each machine's own catalog open while it starts
+        // sharing (the Library page, thumbnails, previews): starting mustn't
+        // need it to itself.
+        let desk_app = Library::open_in(&desk_path, nas.clone()).unwrap();
+        let laptop_app = Library::open(&laptop_path).unwrap();
+        assert_eq!(desk_app.clips().unwrap().len(), 2);
+        assert_eq!(laptop_app.clips().unwrap().len(), 0);
 
         assert_eq!(remote(&cfg).unwrap(), None);
         // Joining an empty catalog is refused; so is filling it twice.
@@ -1178,6 +1228,16 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("library-before-shared-")
         );
+        // The laptop's own catalog was kept aside; its copy is the shared one.
+        let kept = Library::open(&aside).unwrap();
+        assert_eq!(kept.catalog().unwrap().tags_of("x.mp4.1").unwrap().len(), 1);
+        let copy = Library::open(&laptop_path).unwrap();
+        assert!(copy.catalog().unwrap().tags_of("x.mp4.1").is_none());
+        assert_eq!(copy.videos().unwrap().len(), 1);
+        drop((kept, copy));
+        // Connections opened before (as the app's are) see the copy too.
+        assert!(laptop_app.catalog().unwrap().tags_of("x.mp4.1").is_none());
+        drop((desk_app, laptop_app));
         let laptop_nas = Some(PathBuf::from("/media/nas"));
 
         let desk = open(&cfg, &desk_path, nas.clone()).unwrap();

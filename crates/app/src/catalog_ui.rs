@@ -232,14 +232,24 @@ fn confirm_start(
                 .as_ref()
                 .map(|(by, at)| format!(" (filled from {by}, {at})"))
                 .unwrap_or_default();
+            let mine = summary
+                .filled_by
+                .as_ref()
+                .is_some_and(|(by, _)| *by == library::machine::name());
+            let after = if mine {
+                format!(
+                    "That was this machine, so it holds this machine's catalog already. This machine's own catalog ({}) is kept as library-before-shared-<date>.sqlite3 anyway.",
+                    local.text()
+                )
+            } else {
+                format!(
+                    "This machine's own catalog ({}) is kept as library-before-shared-<date>.sqlite3 and no longer used.",
+                    local.text()
+                )
+            };
             (
                 "Use the shared catalog?".to_owned(),
-                format!(
-                    "{} has {}{from}. This machine's own catalog ({}) is put aside as library-before-shared-<date>.sqlite3 and no longer used.",
-                    cfg.describe(),
-                    summary.text(),
-                    local.text()
-                ),
+                format!("{} has {}{from}. {after}", cfg.describe(), summary.text()),
                 "Use the shared catalog",
                 false,
             )
