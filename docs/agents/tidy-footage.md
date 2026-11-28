@@ -170,7 +170,8 @@ Report:
   happy;
 - anything that failed.
 
-Remind Liam that Resolve projects may need Relink Media, and that Ghost Run's
+Remind Liam that Resolve projects may need relinking (Ghost Run's Videos → Bring back
+footage… does it for the open project), and that Ghost Run's
 Library will list NAS-only footage once stage A of 0005 ships (until then,
 clips that were only local disappear from the Library, and their runs are kept
 in the run database).

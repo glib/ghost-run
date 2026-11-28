@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MediaInfo {
     pub codec: String,
     pub width: u32,

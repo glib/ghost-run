@@ -161,6 +161,85 @@ pub fn remove_local_copies(library: &crate::Library, clips: &[Clip], roots: &Roo
     out
 }
 
+/// What [`copy_here`] did.
+#[derive(Debug, Default)]
+pub struct Copied {
+    pub copied: usize,
+    /// Each clip not copied, and why.
+    pub failed: Vec<String>,
+    /// Stopped before the end.
+    pub stopped: bool,
+}
+
+impl Copied {
+    pub fn text(&self) -> String {
+        let mut text = format!(
+            "Copied {} {} here to edit.",
+            self.copied,
+            if self.copied == 1 { "clip" } else { "clips" }
+        );
+        if let Some(first) = self.failed.first() {
+            text.push_str(&format!(" {} failed: {first}", self.failed.len()));
+        }
+        if self.stopped {
+            text.push_str(" Stopped.");
+        }
+        text
+    }
+}
+
+/// [`hydrate`]s each clip and makes its proxy if it has none, saving where
+/// it is now in the catalog. `status` gets a line and 0.0–1.0 for them all.
+pub fn copy_here(
+    library: &crate::Library,
+    clips: &[Clip],
+    roots: &Roots,
+    cancel: &Cancel,
+    mut status: impl FnMut(String, f64),
+) -> Copied {
+    use std::sync::atomic::Ordering;
+    let total = clips.len();
+    let mut out = Copied::default();
+    for (i, clip) in clips.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            out.stopped = true;
+            break;
+        }
+        let name = clip.name();
+        let mut step = |stage: &str, f: f64| {
+            status(
+                format!("{stage} {name} ({} of {total})", i + 1),
+                (i as f64 + f) / total as f64,
+            )
+        };
+        let result = hydrate(clip, roots, cancel, |f| {
+            step("Copying from the NAS:", f * 0.5)
+        })
+        .and_then(|local| {
+            if proxy::proxy_path(&local).is_file() {
+                return Ok(());
+            }
+            let info = clip.info.as_ref().context("the clip couldn't be read")?;
+            proxy::make(&local, info, cancel, |f| {
+                step("Making the proxy of", 0.5 + f * 0.5)
+            })
+            .map(|_| ())
+        });
+        let mut updated = clip.clone();
+        crate::scan::place(&mut updated, roots);
+        let _ = library.upsert(&updated);
+        match result {
+            Ok(()) => out.copied += 1,
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                out.stopped = true;
+                break;
+            }
+            Err(e) => out.failed.push(format!("{name}: {e:#}")),
+        }
+    }
+    out
+}
+
 /// What [`settle`] did with a newly imported clip's local copy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Settled {

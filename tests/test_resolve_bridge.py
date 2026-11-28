@@ -15,16 +15,21 @@ spec.loader.exec_module(bridge)
 
 
 class FakeMediaPoolItem:
-    def __init__(self, path):
+    def __init__(self, path, frames=None, timecode=None):
         self.path = path
         self.proxy = None
+        self.props = {"Frames": frames, "Start TC": timecode}
 
     def LinkProxyMedia(self, path):
         self.proxy = path
         return True
 
+    def ReplaceClip(self, path):
+        self.path = path
+        return True
+
     def GetClipProperty(self, name):
-        return self.path if name == "File Path" else None
+        return self.path if name == "File Path" else self.props.get(name)
 
 
 class FakeItem:
@@ -45,8 +50,9 @@ class FakeItem:
 
 
 class FakeTimeline:
-    def __init__(self, tracks, name="Edit"):
+    def __init__(self, tracks, name="Edit", audio=None):
         self.tracks = tracks  # list of lists of FakeItem, track 1 first
+        self.audio = audio or []
         self.name = name
 
     def GetName(self):
@@ -56,10 +62,10 @@ class FakeTimeline:
         return 86400
 
     def GetTrackCount(self, kind):
-        return len(self.tracks)
+        return len(self.audio if kind == "audio" else self.tracks)
 
     def GetItemListInTrack(self, kind, index):
-        return list(self.tracks[index - 1])
+        return list((self.audio if kind == "audio" else self.tracks)[index - 1])
 
     def AddTrack(self, kind):
         self.tracks.append([])
@@ -472,6 +478,80 @@ class NewProjectTests(unittest.TestCase):
     def test_names_never_clash(self):
         self.assertEqual(bridge.unused_name({"A", "A 2"}, "A"), "A 3")
         self.assertEqual(bridge.unused_name(set(), "A"), "A")
+
+
+class RelinkTests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        here = Path(self.dir.name)
+        self.copy = here / "GX010123.MP4.mov"
+        self.copy.write_bytes(b"copy")
+        self.proxy = here / "Proxy" / "GX010123.MP4.mov"
+        self.proxy.parent.mkdir()
+        self.proxy.write_bytes(b"proxy")
+        self.online = here / "music.wav"
+        self.online.write_bytes(b"wav")
+        self.gone = FakeMediaPoolItem("/old/clips/f-~47~58010123.~4d~50~34.mov", "1200",
+                                      "11:00:00:00")
+        self.unused = FakeMediaPoolItem("/old/clips/unused.MP4", "300", None)
+        music = FakeMediaPoolItem(str(self.online))
+        timeline = FakeTimeline(
+            [[FakeItem(self.gone, 0, 100, 0), FakeItem(None, 100, 150, 0),
+              FakeItem(self.gone, 150, 300, 400)]],
+            name="Final", audio=[[FakeItem(music, 0, 300, 0)]],
+        )
+        self.project = FakeProject(timeline, name="Ridge laps")
+        bin_ = FakeFolder("Footage")
+        bin_.clips = [self.gone, self.unused]
+        self.project.pool.root.subfolders.append(bin_)
+        self.project.pool.root.clips.append(music)
+        self.resolve = FakeResolve(self.project)
+
+    def run_bridge(self, **request):
+        return bridge.handle(request, lambda: self.resolve)
+
+    def test_lists_the_open_timelines_files_or_the_whole_projects(self):
+        reply = self.run_bridge(command="list_media")
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual((reply["project"], reply["timeline"]), ("Ridge laps", "Final"))
+        self.assertEqual(reply["files"], [
+            {"path": self.gone.path, "frames": 1200, "timecode": "11:00:00:00",
+             "online": False},
+            {"path": str(self.online), "frames": None, "timecode": None, "online": True},
+        ])
+        reply = self.run_bridge(command="list_media", whole_project=True)
+        self.assertEqual([f["path"] for f in reply["files"]],
+                         [str(self.online), self.gone.path, self.unused.path])
+
+    def test_no_open_timeline(self):
+        self.project.timeline = None
+        reply = self.run_bridge(command="list_media")
+        self.assertEqual(reply["error"], "no_timeline")
+        self.assertTrue(self.run_bridge(command="list_media", whole_project=True)["ok"])
+
+    def test_points_items_at_their_new_files_and_saves(self):
+        old = self.gone.path
+        reply = self.run_bridge(command="relink", project="Ridge laps", files=[
+            {"path": old, "new": str(self.copy), "proxy": str(self.proxy)},
+            {"path": self.unused.path, "new": "/nowhere/unused.MP4.mov", "proxy": None},
+            {"path": "/old/clips/never.MP4", "new": str(self.copy), "proxy": None},
+        ])
+        self.assertTrue(reply["ok"], reply)
+        self.assertEqual(reply["relinked"], 1)
+        self.assertEqual(self.gone.path, str(self.copy))
+        self.assertEqual(self.gone.proxy, str(self.proxy))
+        self.assertEqual(self.unused.path, "/old/clips/unused.MP4")
+        self.assertEqual(reply["notes"], [
+            "unused.MP4: /nowhere/unused.MP4.mov isn't there",
+            "never.MP4: not in the media pool",
+        ])
+        self.assertEqual(self.resolve.saved, 1)
+
+    def test_another_project_open_is_refused(self):
+        reply = self.run_bridge(command="relink", project="Whistler", files=[])
+        self.assertEqual(reply["error"], "other_project")
+        self.assertEqual(self.resolve.saved, 0)
 
 
 if __name__ == "__main__":

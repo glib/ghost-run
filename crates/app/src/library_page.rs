@@ -933,7 +933,16 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     let _ = replies.send(Reply::Done(text));
                 }
                 Command::Hydrate(clips, roots) => {
-                    let text = hydrate(&library, &clips, &roots, &cancel, &replies);
+                    let text = library::hydrate::copy_here(
+                        &library,
+                        &clips,
+                        &roots,
+                        &cancel,
+                        |text, f| {
+                            let _ = replies.send(Reply::Status(text, Some(f)));
+                        },
+                    )
+                    .text();
                     send_clips(&library);
                     let _ = replies.send(Reply::Done(text));
                 }
@@ -1954,59 +1963,6 @@ fn confirm_dehydrate(p: &Page) {
         let _ = p2.tx.send(Command::Dehydrate(clips.clone(), roots.clone()));
     });
     dialog.present(Some(&p.window));
-}
-
-/// Copies each clip down from the NAS, then makes its proxy; returns what
-/// happened.
-fn hydrate(
-    library: &Library,
-    clips: &[Clip],
-    roots: &Roots,
-    cancel: &Cancel,
-    replies: &mpsc::Sender<Reply>,
-) -> String {
-    let total = clips.len();
-    let (mut copied, mut failed) = (0usize, Vec::new());
-    for (i, clip) in clips.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let name = clip.name();
-        let status = |stage: &str, f: f64| {
-            let _ = replies.send(Reply::Status(
-                format!("{stage} {name} ({} of {total})", i + 1),
-                Some((i as f64 + f) / total as f64),
-            ));
-        };
-        let result = library::hydrate::hydrate(clip, roots, cancel, |f| {
-            status("Copying from the NAS:", f * 0.5)
-        })
-        .and_then(|local| {
-            let info = clip.info.as_ref().expect("filtered on info");
-            proxy::make(&local, info, cancel, |f| {
-                status("Making the proxy of", 0.5 + f * 0.5)
-            })
-        });
-        let mut updated = clip.clone();
-        scan::place(&mut updated, roots);
-        let _ = library.upsert(&updated);
-        match result {
-            Ok(_) => copied += 1,
-            Err(_) if cancel.load(Ordering::Relaxed) => break,
-            Err(e) => failed.push(format!("{name}: {e:#}")),
-        }
-    }
-    let mut text = format!(
-        "Copied {copied} {} here to edit.",
-        plural(copied, "clip", "clips")
-    );
-    if let Some(first) = failed.first() {
-        text.push_str(&format!(" {} failed: {first}", failed.len()));
-    }
-    if cancel.load(Ordering::Relaxed) {
-        text.push_str(" Stopped.");
-    }
-    text
 }
 
 /// "2:31.400 · 3rd", or just the lap for a run that isn't ranked.

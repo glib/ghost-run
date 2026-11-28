@@ -20,6 +20,16 @@ Requests:
     {"project", "timeline", "items": [{"path", "track", "record",
     "first_frame", "frames"}, ...]} in timeline order. Refused when another
     project is open than the one named, rather than switching projects.
+  {"command": "list_media", "whole_project": bool}
+    The files the open project uses, each once: on the open timeline (all
+    its video and audio tracks), or anywhere in the media pool.
+    {"project", "timeline", "files": [{"path", "frames", "timecode",
+    "online"}, ...]}; "online" says whether the file can be opened now.
+  {"command": "relink", "project": name, "files": [{"path": old path,
+   "new": path, "proxy": path or null}, ...]}
+    Points each media pool item using an old path at its new file
+    (ReplaceClip), links its proxy, and saves the project. Refused when
+    another project is open than the one named.
 
 Replies are {"ok": true, ...} or {"ok": false, "error": code, "message": text}.
 
@@ -453,7 +463,97 @@ def read_timeline(resolve, request):
             "items": items}
 
 
-COMMANDS = ("status", "add_overlays", "new_project", "read_timeline")
+def as_int(value):
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def pool_items(folder):
+    """Every media pool item under `folder`."""
+    out = list(folder.GetClipList() or [])
+    for sub in folder.GetSubFolderList() or []:
+        out.extend(pool_items(sub))
+    return out
+
+
+def media_file(mpi):
+    """What list_media says about a media pool item, or None if it isn't a
+    file (a timeline, title or generator)."""
+    path = mpi.GetClipProperty("File Path") if mpi else None
+    if not path:
+        return None
+    return {
+        "path": path,
+        "frames": as_int(mpi.GetClipProperty("Frames")),
+        "timecode": mpi.GetClipProperty("Start TC") or None,
+        "online": os.path.isfile(path),
+    }
+
+
+def list_media(resolve, request):
+    project = current_project(resolve)
+    timeline = project.GetCurrentTimeline()
+    if request.get("whole_project"):
+        items = pool_items(project.GetMediaPool().GetRootFolder())
+    else:
+        if timeline is None:
+            raise BridgeError("no_timeline", "No timeline is open in Resolve.")
+        items = []
+        for kind in ("video", "audio"):
+            for track in range(1, int(timeline.GetTrackCount(kind)) + 1):
+                for item in timeline.GetItemListInTrack(kind, track) or []:
+                    items.append(item.GetMediaPoolItem())
+    files, seen = [], set()
+    for mpi in items:
+        found = media_file(mpi)
+        if found is None or found["path"] in seen:
+            continue
+        seen.add(found["path"])
+        files.append(found)
+    return {"ok": True, "project": project.GetName(),
+            "timeline": timeline.GetName() if timeline else None, "files": files}
+
+
+def relink(resolve, request):
+    project = current_project(resolve)
+    wanted = request.get("project")
+    if wanted and project.GetName() != wanted:
+        raise BridgeError(
+            "other_project",
+            "Open the project %s in Resolve first (%s is open)." % (wanted, project.GetName()),
+        )
+    by_old = {}
+    for f in request.get("files", []):
+        by_old.setdefault(f["path"], f)
+    relinked, notes, seen = 0, [], set()
+    for mpi in pool_items(project.GetMediaPool().GetRootFolder()):
+        path = mpi.GetClipProperty("File Path")
+        wanted_file = by_old.get(path)
+        if wanted_file is None:
+            continue
+        seen.add(path)
+        name = os.path.basename(path)
+        new = wanted_file["new"]
+        if not os.path.isfile(new):
+            notes.append("%s: %s isn't there" % (name, new))
+            continue
+        if not mpi.ReplaceClip(new):
+            notes.append("%s: Resolve wouldn't take %s" % (name, os.path.basename(new)))
+            continue
+        relinked += 1
+        proxy = wanted_file.get("proxy")
+        if proxy and os.path.isfile(proxy) and not mpi.LinkProxyMedia(proxy):
+            notes.append("%s: Resolve didn't take its proxy" % name)
+    for path in by_old:
+        if path not in seen:
+            notes.append("%s: not in the media pool" % os.path.basename(path))
+    resolve.GetProjectManager().SaveProject()
+    return {"ok": True, "project": project.GetName(), "relinked": relinked, "notes": notes}
+
+
+COMMANDS = ("status", "add_overlays", "new_project", "read_timeline", "list_media", "relink")
 
 
 def handle(request, resolve_factory=connect):
@@ -468,6 +568,10 @@ def handle(request, resolve_factory=connect):
             return new_project(resolve, request)
         if command == "read_timeline":
             return read_timeline(resolve, request)
+        if command == "list_media":
+            return list_media(resolve, request)
+        if command == "relink":
+            return relink(resolve, request)
         return add_overlays(resolve, request.get("items", []))
     except BridgeError as e:
         return {"ok": False, "error": e.code, "message": e.message}
