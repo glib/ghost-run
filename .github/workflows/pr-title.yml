@@ -1,0 +1,22 @@
+name: PR title
+
+# A PR's title becomes its squash commit on main, and the release job reads
+# those to pick the next version (docs/releasing.md), so it has to be a
+# Conventional Commit subject: `feat: ...`, `fix(import): ...`, `feat!: ...`.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: Conventional title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: python3 scripts/release.py check-title "$TITLE"

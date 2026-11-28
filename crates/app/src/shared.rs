@@ -34,6 +34,8 @@ pub enum Change {
     /// The catalog was shared or stopped being shared (`crate::catalog_ui`):
     /// every page reloads from the catalog now in use.
     Catalog,
+    /// An update was found, installed or failed (`crate::updates`).
+    Update,
 }
 
 /// Where runs sent to Resolve go.

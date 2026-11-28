@@ -1,4 +1,4 @@
-# 0006 — One catalog for every machine, in Postgres on resolve-db
+# 0007 — One catalog for every machine, in Postgres on resolve-db
 
 Status: accepted (2026-11-28). Issue #69; done in #70 (preparation) and the
 PR that adds the shared catalog.

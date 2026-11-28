@@ -221,6 +221,7 @@ pub fn open(shared: &Shared) {
     resolve.add(&container);
     page.add(&crate::catalog_ui::group(shared));
     page.add(&crate::strava_ui::group(shared));
+    page.add(&crate::updates::group(shared, &mut subscriptions));
     let shared2 = shared.clone();
     dialog.connect_closed(move |_| {
         for id in &subscriptions {

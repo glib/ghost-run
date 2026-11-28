@@ -1,5 +1,5 @@
 #!/bin/sh
-# Makes Ghost Run's shared catalog on a Postgres server (#69, decision 0006):
+# Makes Ghost Run's shared catalog on a Postgres server (#69, decision 0007):
 # a `ghost_run` login role and a `ghost_run` database it owns, reachable from
 # the LAN with a password. Other databases (DaVinci Resolve's) are left alone.
 #

@@ -1,4 +1,4 @@
-//! A catalog shared between machines (#69, decision 0006): the library's
+//! A catalog shared between machines (#69, decision 0007): the library's
 //! tables in a Postgres database of their own (`ghost_run`, on the
 //! resolve-db container), instead of this machine's `library.sqlite3`.
 //!

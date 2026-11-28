@@ -18,6 +18,7 @@ mod strava_ui;
 mod time_page;
 mod tracks_view;
 mod ui;
+mod updates;
 mod videos_page;
 
 use anyhow::{Context, Result};
@@ -32,7 +33,7 @@ use ingest::{
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version = env!("GHOST_RUN_VERSION"), about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Action>,
