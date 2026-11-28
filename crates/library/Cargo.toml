@@ -12,8 +12,10 @@ ingest = { path = "../ingest" }
 libc = "0.2"
 regex.workspace = true
 rusqlite = { version = "0.38", features = ["bundled"] }
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 timer-align = { path = "../timer-align" }
 timer-core = { path = "../timer-core" }
 toml = "0.9"

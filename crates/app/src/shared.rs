@@ -31,6 +31,8 @@ pub enum Change {
     ShowVideo,
     /// Strava was synced or disconnected (`crate::strava_ui`).
     Strava,
+    /// An update was found, installed or failed (`crate::updates`).
+    Update,
 }
 
 /// Where runs sent to Resolve go.

@@ -24,7 +24,7 @@ const AUTO_EVERY: Duration = Duration::from_secs(3600);
 static LAST: Mutex<(Option<Instant>, bool)> = Mutex::new((None, false));
 
 /// Runs `work` on a thread and hands its answer to `done` on the main thread.
-fn in_background<T: Send + 'static>(
+pub(crate) fn in_background<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(T) + 'static,
 ) {

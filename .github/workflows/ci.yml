@@ -107,3 +107,101 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked -p timer-cli
       - run: scripts/parity.sh
+
+  # Releases (docs/releasing.md): after the checks pass on main, the commits
+  # since the last vX.Y.Z tag pick the next version (scripts/release.py). If
+  # there is one, it's built in the Fedora the app's distrobox runs, so the
+  # binary finds the same GTK and glibc there, and published as a GitHub
+  # release the app updates itself from.
+  version:
+    name: Next version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [python, rust, parity]
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: next
+        run: |
+          version=$(python3 scripts/release.py next --notes notes.md)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -n "$version" ]; then
+            echo "Releasing $version" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Nothing to release (only docs, tests, CI, chores or refactors since the last tag)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.next.outputs.version != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  # Also on pull requests (as 0.0.0-ci, kept for a week), so a change that
+  # breaks the Fedora build is caught before it reaches main, and a PR's
+  # build can be tried by hand.
+  build-release:
+    name: Build release (Fedora ${{ vars.RELEASE_FEDORA || '44' }})
+    needs: version
+    if: >-
+      always() && (github.event_name == 'pull_request' ||
+      (needs.version.result == 'success' && needs.version.outputs.version != ''))
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:${{ vars.RELEASE_FEDORA || '44' }}
+    env:
+      GHOST_RUN_VERSION: ${{ needs.version.outputs.version || '0.0.0-ci' }}
+    steps:
+      - name: Install build tools
+        timeout-minutes: 15
+        run: dnf install -y --setopt=install_weak_deps=False gcc pkgconf-pkg-config gtk4-devel libadwaita-devel tar gzip git
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fedora-${{ vars.RELEASE_FEDORA || '44' }}
+      - run: cargo build --release --locked -p ghost-run -p timer-cli
+      - name: Check it says its version
+        run: |
+          said=$(target/release/ghost-run --version)
+          echo "$said"
+          [ "$said" = "ghost-run $GHOST_RUN_VERSION" ]
+      - name: Pack
+        run: |
+          arch=$(uname -m)
+          root="ghost-run-$GHOST_RUN_VERSION"
+          install -Dm755 target/release/ghost-run "dist/$root/bin/ghost-run"
+          install -Dm755 target/release/rtimer "dist/$root/bin/rtimer"
+          install -Dm644 packaging/io.github.glib.GhostRun.svg "dist/$root/share/icons/hicolor/scalable/apps/io.github.glib.GhostRun.svg"
+          install -Dm644 packaging/io.github.glib.GhostRun.desktop "dist/$root/share/applications/io.github.glib.GhostRun.desktop.in"
+          cd dist
+          tar -czf "$root-$arch-linux.tar.gz" "$root"
+          sha256sum "$root-$arch-linux.tar.gz" > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          retention-days: ${{ github.event_name == 'pull_request' && 7 || 90 }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+  publish:
+    name: Publish release
+    needs: [version, build-release]
+    if: needs.version.outputs.version != '' && needs.build-release.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+      - run: |
+          gh release create "v$VERSION" out/release/* \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Ghost Run $VERSION" --notes-file out/notes/notes.md --latest

@@ -71,7 +71,12 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     drawer.set_show_sidebar(false);
     drawer.set_max_sidebar_width(560.0);
     drawer.set_sidebar_width_fraction(0.5);
-    drawer.set_content(Some(&stack));
+    // A release's banner over the pages (`crate::updates`).
+    let pages_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    pages_box.append(&crate::updates::banner(&shared));
+    stack.set_vexpand(true);
+    pages_box.append(&stack);
+    drawer.set_content(Some(&pages_box));
     let activity = gtk::Label::new(None);
     activity.add_css_class("dim-label");
     activity.add_css_class("caption");
@@ -150,6 +155,7 @@ pub fn shell(window: &adw::ApplicationWindow, import: gtk::Widget) -> adw::Navig
     if !select(&list, &start) {
         select(&list, "library");
     }
+    crate::updates::start(&shared);
     // GHOST_RUN_CLIP=<path> opens that clip to time: for screenshots.
     if let Some(clip) = std::env::var_os("GHOST_RUN_CLIP") {
         shared.time_clip(clip.into());
