@@ -30,6 +30,7 @@ pub mod hydrate;
 pub mod kinds;
 pub mod organise;
 pub mod overlays;
+pub mod power;
 pub mod preview;
 pub mod probe;
 pub mod proxy;

@@ -42,12 +42,15 @@ use crate::shared::{Change, Shared};
 enum Command {
     /// Scan these folders, then back the catalog up to the NAS archive (with
     /// the run database) if there is one.
-    /// Then makes previews for NAS clips without one.
-    Scan(Vec<PathBuf>, Roots, Option<BackupTo>),
+    /// Then, with `true` (Settings → Make missing previews, in the
+    /// background), shares this machine's previews on the NAS and makes the
+    /// ones NAS clips are missing.
+    Scan(Vec<PathBuf>, Roots, Option<BackupTo>, bool),
     /// Each clip (its Library path, the file to make the proxy of, its info).
     Proxies(Vec<(PathBuf, PathBuf, MediaInfo)>),
-    /// Place markers in each clip (path, footage to read) from the best-matching course.
-    AutoPlace(Vec<(PathBuf, PathBuf)>, Vec<Reference>),
+    /// Place markers in each clip from the best-matching course (a NAS
+    /// clip's preview fetched or made first).
+    AutoPlace(Vec<Clip>, Vec<Reference>, Roots),
     /// Copy these NAS clips down to edit, with proxies.
     Hydrate(Vec<Clip>, Roots),
     /// Remove these NAS clips' local copies.
@@ -762,17 +765,35 @@ fn make_previews(
     send_clips: &dyn Fn(&Library),
 ) -> String {
     use std::sync::Mutex;
-    let queue: Vec<Clip> = library
-        .clips()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|c| roots.on_nas(&c.path) && c.preview.is_none() && c.info.is_some())
-        // Offline, only clips with a local copy can be read.
-        .filter(|c| roots.nas_online || c.local.is_some())
-        .collect();
-    if queue.is_empty() {
+    if !roots.nas_online {
+        // Previews are made for the NAS, and read from it.
         return String::new();
     }
+    let clips = library.clips().unwrap_or_default();
+    // Previews made here before they were kept on the NAS go up first.
+    let shared = clips
+        .iter()
+        .filter(|c| roots.on_nas(&c.path))
+        .filter(|c| library::preview::share(roots, c).unwrap_or(false))
+        .count();
+    let shared_text = if shared > 0 {
+        format!(
+            " Put {shared} {} on the NAS.",
+            plural(shared, "preview", "previews")
+        )
+    } else {
+        String::new()
+    };
+    let mut queue: Vec<Clip> = clips
+        .into_iter()
+        .filter(|c| roots.on_nas(&c.path) && c.preview.is_none() && c.info.is_some())
+        .collect();
+    // Newest first: the footage most likely to be timed soon.
+    queue.sort_by(|a, b| b.recorded.cmp(&a.recorded));
+    if queue.is_empty() {
+        return shared_text;
+    }
+    let paused = std::sync::atomic::AtomicBool::new(false);
     let total = queue.len();
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
     // Decoding 4K is the slow part; a few at once keeps the cores busy
@@ -790,24 +811,29 @@ fn make_previews(
             Some(fraction),
         ));
     };
-    let catalog = roots.catalog.clone();
     std::thread::scope(|scope| {
         for _ in 0..jobs {
             let results = results.clone();
-            let (queue, progress, finished, report, catalog) =
-                (&queue, &progress, &finished, &report, &catalog);
+            let (queue, progress, finished, report, paused) =
+                (&queue, &progress, &finished, &report, &paused);
             scope.spawn(move || {
                 loop {
                     if cancel.load(Ordering::Relaxed) {
                         break;
                     }
+                    // Unplugged: leave the rest for later.
+                    if library::power::on_battery() {
+                        paused.store(true, Ordering::Relaxed);
+                        break;
+                    }
                     let Some((i, clip)) = queue.lock().unwrap().pop_front() else {
                         break;
                     };
-                    let result = library::preview::make(catalog, &clip, threads, cancel, |f| {
+                    let result = library::preview::ensure(roots, &clip, threads, cancel, |f| {
                         progress.lock().unwrap()[i] = f;
                         report(*finished.lock().unwrap());
-                    });
+                    })
+                    .map(|(path, _)| path);
                     progress.lock().unwrap()[i] = 1.0;
                     *finished.lock().unwrap() += 1;
                     report(*finished.lock().unwrap());
@@ -832,9 +858,12 @@ fn make_previews(
         }
     }
     send_clips(library);
-    let mut text = format!(" Made {made} {}.", plural(made, "preview", "previews"));
+    let mut text = shared_text + &format!(" Made {made} {}.", plural(made, "preview", "previews"));
     if let Some(first) = failed.first() {
         text.push_str(&format!(" {} failed ({first}).", failed.len()));
+    }
+    if paused.load(Ordering::Relaxed) {
+        text.push_str(" Paused while on battery: the rest are made after a scan on mains power.");
     }
     text
 }
@@ -856,7 +885,7 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
         for command in commands {
             cancel.store(false, Ordering::Relaxed);
             match command {
-                Command::Scan(folders, roots, backup_to) => {
+                Command::Scan(folders, roots, backup_to, background) => {
                     let result = scan::scan(&folders, &roots, &library, &cancel, |p| {
                         let text = match p {
                             Progress::Looking(_) => "Looking for footage…".to_owned(),
@@ -902,7 +931,7 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                             _ => String::new(),
                         };
                     let previews = match &result {
-                        Ok(_) if !cancel.load(Ordering::Relaxed) => {
+                        Ok(_) if background && !cancel.load(Ordering::Relaxed) => {
                             make_previews(&library, &roots, &cancel, &replies, &send_clips)
                         }
                         _ => String::new(),
@@ -951,14 +980,16 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     send_clips(&library);
                     let _ = replies.send(Reply::Done(removed.text()));
                 }
-                Command::AutoPlace(jobs, references) => {
+                Command::AutoPlace(jobs, references, roots) => {
                     let _ = replies.send(Reply::Done(auto_place(
                         &library,
                         &jobs,
                         &references,
+                        &roots,
                         &cancel,
                         &replies,
                     )));
+                    send_clips(&library);
                 }
             }
         }
@@ -969,27 +1000,40 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
 /// `auto` draft; returns what happened.
 fn auto_place(
     library: &Library,
-    jobs: &[(PathBuf, PathBuf)],
+    jobs: &[Clip],
     references: &[Reference],
+    roots: &Roots,
     cancel: &Cancel,
     replies: &mpsc::Sender<Reply>,
 ) -> String {
     let cache = auto::cache_dir();
     let (mut placed, mut to_check, mut unmatched, mut failed) = (0, 0, Vec::new(), Vec::new());
-    for (i, (clip, footage)) in jobs.iter().enumerate() {
+    for (i, job) in jobs.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let name = clip
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let clip = &job.path;
+        let name = job.name();
+        let at = i as f64 / jobs.len() as f64;
+        let footage = needed_preview(job, roots, cancel, |f| {
+            let _ = replies.send(Reply::Status(
+                format!(
+                    "Getting the preview of {name} ({} of {})…",
+                    i + 1,
+                    jobs.len()
+                ),
+                Some(at + f / jobs.len() as f64 / 2.0),
+            ));
+        });
+        if let Some(preview) = &footage {
+            let _ = library.set_preview(clip, Some(preview.clone()));
+        }
+        let footage = footage.unwrap_or_else(|| auto::footage(job));
         let _ = replies.send(Reply::Status(
             format!("Matching {name} ({} of {})…", i + 1, jobs.len()),
-            Some(i as f64 / jobs.len() as f64),
+            Some(at),
         ));
-        match auto::match_courses(references, footage, cache.as_deref()) {
+        match auto::match_courses(references, &footage, cache.as_deref()) {
             Ok(ranked) if ranked[0].match_cost < auto::POOR_MATCH => {
                 let best = &ranked[0];
                 let draft = Draft {
@@ -1037,6 +1081,28 @@ fn auto_place(
     text
 }
 
+/// For a NAS clip with neither a proxy nor a preview on this machine: its
+/// preview, fetched from the NAS or made now (Settings → Make missing
+/// previews: only when needed). `None` when it has one already or none
+/// could be had (then the original is read).
+pub fn needed_preview(
+    clip: &Clip,
+    roots: &Roots,
+    cancel: &Cancel,
+    progress: impl FnMut(f64),
+) -> Option<PathBuf> {
+    if !roots.on_nas(&clip.path)
+        || matches!(clip.proxy, ProxyState::Ready(_))
+        || library::preview::here(roots, &clip.path, clip.size)
+        || clip.info.is_none()
+    {
+        return None;
+    }
+    library::preview::ensure(roots, clip, 0, cancel, progress)
+        .ok()
+        .map(|(path, _)| path)
+}
+
 /// Auto-places the ticked clips that have neither a run nor a draft yet.
 fn start_auto(p: &Page) {
     let ticked: Vec<PathBuf> = p.state.borrow().selected.iter().cloned().collect();
@@ -1079,7 +1145,7 @@ fn start_auto_for(p: &Page, paths: &[PathBuf], quiet: bool) {
         }
     };
     let mut skipped = 0;
-    let jobs: Vec<(PathBuf, PathBuf)> = s
+    let jobs: Vec<Clip> = s
         .clips
         .iter()
         .filter(|c| paths.contains(&c.path) && c.info.is_some())
@@ -1088,7 +1154,7 @@ fn start_auto_for(p: &Page, paths: &[PathBuf], quiet: bool) {
             skipped += usize::from(done);
             !done
         })
-        .map(|c| (c.path.clone(), auto::footage(c)))
+        .cloned()
         .collect();
     drop(s);
     if jobs.is_empty() {
@@ -1113,7 +1179,8 @@ fn start_auto_for(p: &Page, paths: &[PathBuf], quiet: bool) {
     ));
     p.progress.set_visible(true);
     refresh_controls(p);
-    let _ = p.tx.send(Command::AutoPlace(jobs, references));
+    let roots = p.state.borrow().roots.clone();
+    let _ = p.tx.send(Command::AutoPlace(jobs, references, roots));
 }
 
 fn scan_summary(r: &scan::ScanReport) -> String {
@@ -1237,7 +1304,9 @@ fn start_scan(p: &Page) {
             archive: a,
             run_database: p.shared.settings().run_database.clone(),
         });
-    let _ = p.tx.send(Command::Scan(folders, roots, backup_to));
+    let background = p.shared.settings().background_previews();
+    let _ =
+        p.tx.send(Command::Scan(folders, roots, backup_to, background));
 }
 
 /// The clips "Make proxies" would work on: the ticked ones, or else every
@@ -2585,7 +2654,7 @@ fn nas_text(s: &State, clip: &Clip) -> (String, Option<String>) {
         tip.push_str("\nThe NAS isn't mounted now: shown as last catalogued.");
     }
     if clip.preview.is_none() {
-        tip.push_str("\nNo preview yet: it's made after the next scan.");
+        tip.push_str("\nNo preview yet: it's made when the clip is timed or auto-placed, or in the background (Settings → Make missing previews).");
     }
     match &clip.local {
         Some(local) => (

@@ -192,8 +192,7 @@ pub fn scan(
 pub fn place(clip: &mut Clip, roots: &Roots) {
     if roots.on_nas(&clip.path) {
         clip.local = roots.local_copy(&clip.path).filter(|p| p.is_file());
-        clip.preview = Some(preview::preview_path(&roots.catalog, &clip.path, clip.size))
-            .filter(|p| p.is_file());
+        clip.preview = preview::find(roots, &clip.path, clip.size);
     } else {
         clip.local = None;
         clip.preview = None;

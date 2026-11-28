@@ -161,6 +161,39 @@ pub fn open(shared: &Shared) {
         }
     });
     import.add(&limit);
+    let laptop = library::power::has_battery();
+    let previews = adw::ComboRow::new();
+    previews.set_title("Make missing previews");
+    previews.set_subtitle(if laptop {
+        "Automatic here: only when needed"
+    } else {
+        "Automatic here: in the background"
+    });
+    previews.set_tooltip_text(Some(
+        "Previews are the small copies of NAS clips that timing and auto-place read. They're kept on the NAS, so each is made once for every machine. In the background, this machine makes the missing ones after each scan, newest first, paused while on battery. Only when needed: when a clip is timed or auto-placed. Automatic is in the background, except on a machine with a battery.",
+    ));
+    previews.set_model(Some(&gtk::StringList::new(&[
+        "Automatic",
+        "In the background",
+        "Only when needed",
+    ])));
+    previews.set_selected(match shared.settings().previews_in_background {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    });
+    let shared2 = shared.clone();
+    previews.connect_selected_notify(move |row| {
+        let choice = match row.selected() {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        };
+        if shared2.settings().previews_in_background != choice {
+            let _ = shared2.update(|s| s.previews_in_background = choice);
+        }
+    });
+    import.add(&previews);
     let resolve = adw::PreferencesGroup::new();
     resolve.set_title("DaVinci Resolve");
     resolve.set_description(Some(

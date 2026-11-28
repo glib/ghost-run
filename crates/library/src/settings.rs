@@ -33,6 +33,10 @@ pub struct AppSettings {
     /// A brand kit's `brand.toml` (`library::brand`): cards and captions use
     /// its colours, fonts and logos.
     pub brand_kit: Option<PathBuf>,
+    /// Make the previews NAS clips are missing in the background (`true`)
+    /// or only when a clip needs one (`false`); `None`: in the background
+    /// unless this machine has a battery ([`Self::background_previews`]).
+    pub previews_in_background: Option<bool>,
 }
 
 /// The default for [`AppSettings::local_copies_gb`].
@@ -69,6 +73,13 @@ pub fn data_dir() -> PathBuf {
 }
 
 impl AppSettings {
+    /// Whether this machine makes missing previews in the background: as
+    /// set, else on a machine without a battery (a desktop).
+    pub fn background_previews(&self) -> bool {
+        self.previews_in_background
+            .unwrap_or_else(|| !crate::power::has_battery())
+    }
+
     /// [`Self::local_copies_gb`] in bytes, with its default.
     pub fn local_copies_limit(&self) -> u64 {
         u64::from(self.local_copies_gb.unwrap_or(LOCAL_COPIES_GB)) * 1_000_000_000
@@ -131,6 +142,7 @@ mod tests {
             local_copies_gb: Some(80),
             kinds_folder: Some("/home/x/kinds".into()),
             brand_kit: Some("/home/x/brand/brand.toml".into()),
+            previews_in_background: Some(false),
         };
         settings.save_to(&path).unwrap();
         assert_eq!(AppSettings::load_from(&path).unwrap(), settings);
