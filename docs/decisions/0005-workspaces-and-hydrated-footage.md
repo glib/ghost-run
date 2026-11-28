@@ -81,6 +81,14 @@ Three tiers:
   footage folder, `Proxy/` beside it), so a Resolve project relinks by itself
   after a later re-hydrate. It reuses the import's "convert from a verified
   archive" path.
+- Resolve projects made before the footage moved (their files gone, often
+  under the old escaped names) are brought back from the Videos page
+  (**Bring back footage…**, added 2026-11-28): the open timeline's files or
+  the whole project's are matched to the catalog (path, the fixed local
+  path, else the camera name with escapes undone, narrowed by length and
+  timecode), copied here, and Resolve is pointed at the copies
+  (`ReplaceClip`); the timeline is then linked as a video. From then on the
+  fixed paths relink by themselves.
 - **Dehydrate** when a video is published, or on demand: remove local copies no
   unpublished video needs. Only files that can be made again from a verified
   NAS original are ever removed.

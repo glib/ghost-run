@@ -33,6 +33,7 @@ pub mod overlays;
 pub mod preview;
 pub mod probe;
 pub mod proxy;
+pub mod relink;
 pub mod scan;
 pub mod settings;
 pub mod store;

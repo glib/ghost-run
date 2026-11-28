@@ -225,20 +225,10 @@ pub fn match_timeline(clips: &[Clip], found: &[OnTimeline]) -> (Vec<Item>, Vec<S
     (items, missing)
 }
 
-/// A file's name in lower case, an editing copy's (`clip.MP4.mov`) as its
-/// original's.
+/// A file's name as the camera wrote it, in lower case
+/// ([`crate::relink::camera_name`]).
 fn original_name(path: &Path) -> String {
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_lowercase();
-    match name.strip_suffix(".mov") {
-        Some(original) if original.contains('.') && !original.ends_with(".overlay") => {
-            original.to_owned()
-        }
-        _ => name,
-    }
+    crate::relink::camera_name(path)
 }
 
 /// Which kinds of video a clip is in.
