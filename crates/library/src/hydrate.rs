@@ -265,11 +265,8 @@ pub fn settle(
         .local
         .as_deref()
         .context("the clip has no local copy")?;
-    let preview = crate::preview::preview_path(&roots.catalog, &clip.path, clip.size);
-    if !preview.is_file() {
-        crate::preview::make(&roots.catalog, clip, 0, cancel, |f| progress("preview", f))
-            .context("making its preview")?;
-    }
+    crate::preview::ensure(roots, clip, 0, cancel, |f| progress("preview", f))
+        .context("making its preview")?;
     if keep {
         if !proxy::proxy_path(local).is_file() {
             proxy::make(local, info, cancel, |f| progress("proxy", f))

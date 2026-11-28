@@ -54,6 +54,13 @@ enum Auto {
     Matched(PathBuf, Result<Vec<Placement>, String>),
 }
 
+/// News of a preview being fetched or made before a clip opens.
+enum Fetch {
+    Progress(PathBuf, f64),
+    /// The clip, with its preview if one was had.
+    Ready(Box<Clip>, Option<PathBuf>),
+}
+
 /// The clip being timed.
 struct Open {
     clip: Clip,
@@ -82,6 +89,8 @@ struct State {
     reference: Option<Reference>,
     /// An auto-markers job is running.
     auto_busy: bool,
+    /// The clip waiting for its preview before it opens.
+    waiting: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -116,11 +125,13 @@ struct Page {
     use_reference: gtk::Button,
     spinner: gtk::Spinner,
     auto: mpsc::Sender<Auto>,
+    previews: mpsc::Sender<Fetch>,
 }
 
 pub fn page(shared: &Shared) -> gtk::Widget {
     let (requests, decoded) = decoder();
     let (auto, auto_done) = mpsc::channel::<Auto>();
+    let (previews, preview_news) = mpsc::channel::<Fetch>();
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = adw::HeaderBar::new();
@@ -307,6 +318,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
             unsaved: false,
             reference: None,
             auto_busy: false,
+            waiting: None,
         })),
         requests,
         title,
@@ -334,6 +346,7 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         use_reference: use_reference.clone(),
         spinner,
         auto,
+        previews,
     };
 
     for (b, step) in step_buttons {
@@ -414,6 +427,9 @@ pub fn page(shared: &Shared) -> gtk::Widget {
         }
         for result in auto_done.try_iter() {
             auto_finished(&p, result);
+        }
+        for news in preview_news.try_iter() {
+            preview_news_came(&p, news);
         }
         glib::ControlFlow::Continue
     });
@@ -531,7 +547,70 @@ fn open_path(p: &Page, path: &Path) {
     open_clip(p, clip);
 }
 
+/// Opens a clip; a NAS clip with neither a proxy nor a preview on this
+/// machine gets its preview first (from the NAS, else made now), so it reads
+/// a small local file rather than the full-size original over the network.
 fn open_clip(p: &Page, clip: Clip) {
+    let roots = crate::library_page::roots();
+    let wanted = roots.on_nas(&clip.path)
+        && !matches!(clip.proxy, ProxyState::Ready(_))
+        && !library::preview::here(&roots, &clip.path, clip.size)
+        && clip.info.is_some()
+        && (roots.nas_online || clip.local.is_some());
+    if !wanted {
+        p.state.borrow_mut().waiting = None;
+        open_now(p, clip);
+        return;
+    }
+    p.state.borrow_mut().waiting = Some(clip.path.clone());
+    p.status
+        .set_text(&format!("Getting the preview of {}…", clip.name()));
+    let tx = p.previews.clone();
+    std::thread::spawn(move || {
+        let path = clip.path.clone();
+        let preview =
+            crate::library_page::needed_preview(&clip, &roots, &library::Cancel::default(), |f| {
+                let _ = tx.send(Fetch::Progress(path.clone(), f));
+            });
+        if let Some(preview) = &preview {
+            let _ =
+                Library::open_default().and_then(|l| l.set_preview(&path, Some(preview.clone())));
+        }
+        let _ = tx.send(Fetch::Ready(Box::new(clip), preview));
+    });
+}
+
+fn preview_news_came(p: &Page, news: Fetch) {
+    let waiting = p.state.borrow().waiting.clone();
+    match news {
+        Fetch::Progress(path, f) if waiting.as_ref() == Some(&path) => {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            p.status.set_text(&format!(
+                "Making the preview of {name} (it's kept on the NAS for next time): {:.0}%",
+                f * 100.0
+            ));
+        }
+        Fetch::Ready(mut clip, preview) if waiting.as_ref() == Some(&clip.path) => {
+            p.state.borrow_mut().waiting = None;
+            let note = if preview.is_some() {
+                String::new()
+            } else {
+                format!(
+                    "No preview could be had for {}: reading the original, which is slower.",
+                    clip.name()
+                )
+            };
+            if preview.is_some() {
+                clip.preview = preview;
+            }
+            p.status.set_text(&note);
+            open_now(p, *clip);
+        }
+        _ => {}
+    }
+}
+
+fn open_now(p: &Page, clip: Clip) {
     let Some(info) = clip.info.clone() else {
         return;
     };

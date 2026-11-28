@@ -73,6 +73,13 @@ Three tiers:
   unless **Keep for editing** is on, for the whole import or the clips picked
   (for a video started straight after the ride). The card is **safe to wipe**
   once every original is verified on the NAS; a local copy alone never counts.
+- Previews are also kept on the NAS (`<footage root>/.ghost-run/previews/`,
+  added 2026-11-28 after a laptop started making previews for the whole
+  library): each is made once for every machine, and a machine keeps its own
+  copies of the ones it has used, as a cache that works away from the NAS. A
+  missing preview is made when a clip is timed or auto-placed; making them
+  all in the background is a per-machine setting, on by default only on
+  machines without a battery, newest first, paused on battery.
 - Timing, auto-place, finding the course, leaderboards, audio suggestions and
   overlay renders all work on the catalog alone: none of them need the
   full-size file (overlays need only the clip's size, rate and timecode).
