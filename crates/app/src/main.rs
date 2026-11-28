@@ -10,6 +10,7 @@ mod organise_ui;
 mod output_page;
 mod resolve;
 mod resolve_menu;
+mod resolve_projects;
 mod runs_page;
 mod settings_dialog;
 mod shared;

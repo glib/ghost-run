@@ -1003,9 +1003,11 @@ fn worker(commands: mpsc::Receiver<Command>, replies: mpsc::Sender<Reply>, cance
                     let _ = replies.send(Reply::Done(text));
                 }
                 Command::Dehydrate(clips, roots) => {
+                    // Not footage a Resolve project being edited uses.
+                    let (clips, kept) = crate::resolve_projects::guard(clips, &roots);
                     let removed = library::hydrate::remove_local_copies(&library, &clips, &roots);
                     send_clips(&library);
-                    let _ = replies.send(Reply::Done(removed.text()));
+                    let _ = replies.send(Reply::Done(removed.text() + &kept));
                 }
                 Command::AutoPlace(jobs, references, roots) => {
                     let _ = replies.send(Reply::Done(auto_place(
